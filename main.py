@@ -96,9 +96,9 @@ class AccessNavApp(MDApp):
     def is_logged_in(self) -> bool:
         return self.current_user is not None
 
-    def switch_screen(self, nav_bar, item, item_name) -> None:
+    def switch_screen(self, nav_bar, item, item_icon, item_text) -> None:
         if self.is_logged_in():
-            self.root.ids.screen_manager.current = item_name
+            self.root.ids.screen_manager.current = item.name
 
     def _show_nav(self, visible: bool, root=None) -> None:
         """Show or hide the bottom nav bar based on login state."""
