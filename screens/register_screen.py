@@ -21,8 +21,8 @@ class RegisterScreen(MDScreen):
             orientation="vertical",
             md_bg_color=(0.11, 0.62, 0.46, 1),
             size_hint=(1, 0.28),
-            pos_hint={"top": 1},
-            padding=("24dp", "48dp", "24dp", "16dp"),
+            pos_hint={"top": 0.93},
+            padding=("24dp", "24dp", "24dp", "16dp"),
         )
         header.add_widget(
             MDLabel(
@@ -48,7 +48,7 @@ class RegisterScreen(MDScreen):
 
         # Scrollable form
         scroll = ScrollView(
-            size_hint=(1, 0.75),
+            size_hint=(1, 0.65),
             pos_hint={"x": 0, "y": 0},
         )
         form_wrap = MDBoxLayout(
