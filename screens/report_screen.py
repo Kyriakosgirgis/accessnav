@@ -3,12 +3,11 @@ from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.label import MDLabel
 from kivymd.uix.button import MDButton, MDButtonText
 from kivymd.uix.textfield import MDTextField
-from kivymd.uix.appbar import (
-    MDTopAppBar,
-    MDTopAppBarTitle,
-)
+from kivymd.uix.appbar import MDTopAppBar, MDTopAppBarTitle
 from kivymd.uix.selectioncontrol import MDCheckbox
 from kivy.uix.scrollview import ScrollView
+from kivy.clock import Clock
+from kivymd.app import MDApp
 
 
 class ReportScreen(MDScreen):
@@ -17,19 +16,36 @@ class ReportScreen(MDScreen):
         self.barrier_checks = {}
         self.build_ui()
 
+    # ------------------------------------------------------------------ #
+    #  Auth guard                                                          #
+    # ------------------------------------------------------------------ #
+    def on_enter(self, *args):
+        from kivymd.app import MDApp
+        app = MDApp.get_running_app()
+        if not app.is_logged_in():
+            self.manager.current = "login"
+            return
+
+    def _on_authenticated(self):
+        """Called only when a valid session exists."""
+        print("[ReportScreen] Auth OK — ready to accept reports")
+
+    # ------------------------------------------------------------------ #
+    #  UI                                                                  #
+    # ------------------------------------------------------------------ #
+
     def build_ui(self):
         root = MDBoxLayout(orientation="vertical")
 
-        # Toolbar
-        toolbar = MDTopAppBar(
-            MDTopAppBarTitle(text="Report a Barrier"),
-            type="small",
-            size_hint_y=None,
-            height="56dp",
+        root.add_widget(
+            MDTopAppBar(
+                MDTopAppBarTitle(text="Report a Barrier"),
+                type="small",
+                size_hint_y=None,
+                height="56dp",
+            )
         )
-        root.add_widget(toolbar)
 
-        # Scrollable form
         scroll = ScrollView()
         form = MDBoxLayout(
             orientation="vertical",
@@ -39,7 +55,6 @@ class ReportScreen(MDScreen):
             adaptive_height=True,
         )
 
-        # Location note
         form.add_widget(
             MDLabel(
                 text="Your current location will be attached automatically.",
@@ -51,7 +66,6 @@ class ReportScreen(MDScreen):
             )
         )
 
-        # Barrier type heading
         form.add_widget(
             MDLabel(
                 text="Barrier type",
@@ -63,15 +77,13 @@ class ReportScreen(MDScreen):
             )
         )
 
-        # Checkboxes
-        barrier_types = [
+        for key, label in [
             ("broken_elevator", "Broken elevator"),
-            ("missing_ramp", "Missing ramp"),
-            ("blocked_path", "Blocked accessible path"),
-            ("steep_slope", "Steep slope"),
-            ("other", "Other"),
-        ]
-        for key, label in barrier_types:
+            ("missing_ramp",    "Missing ramp"),
+            ("blocked_path",    "Blocked accessible path"),
+            ("steep_slope",     "Steep slope"),
+            ("other",           "Other"),
+        ]:
             row = MDBoxLayout(
                 orientation="horizontal",
                 size_hint_y=None,
@@ -85,15 +97,9 @@ class ReportScreen(MDScreen):
             )
             self.barrier_checks[key] = cb
             row.add_widget(cb)
-            row.add_widget(
-                MDLabel(
-                    text=label,
-                    theme_text_color="Primary",
-                )
-            )
+            row.add_widget(MDLabel(text=label, theme_text_color="Primary"))
             form.add_widget(row)
 
-        # Description field
         self.description_field = MDTextField(
             hint_text="Describe the barrier...",
             mode="outlined",
@@ -103,22 +109,37 @@ class ReportScreen(MDScreen):
         )
         form.add_widget(self.description_field)
 
-        # Submit button
-        submit_btn = MDButton(
-            MDButtonText(text="Submit Report"),
-            style="filled",
-            size_hint=(1, None),
-            height="48dp",
-            on_release=self.submit_report,
+        form.add_widget(
+            MDButton(
+                MDButtonText(text="Submit Report"),
+                style="filled",
+                size_hint=(1, None),
+                height="48dp",
+                on_release=self.submit_report,
+            )
         )
-        form.add_widget(submit_btn)
 
         scroll.add_widget(form)
         root.add_widget(scroll)
         self.add_widget(root)
 
+    # ------------------------------------------------------------------ #
+    #  Actions                                                             #
+    # ------------------------------------------------------------------ #
+
     def submit_report(self, *args):
+        app = MDApp.get_running_app()
         selected = [k for k, cb in self.barrier_checks.items() if cb.active]
-        desc = self.description_field.text
-        print(f"[ReportScreen] Submitting — types={selected}, desc='{desc}'")
-        # Phase 4: POST to FastAPI backend
+        desc = self.description_field.text.strip()
+
+        if not selected:
+            print("[ReportScreen] No barrier type selected")
+            return
+
+        print(
+            f"[ReportScreen] Submitting — "
+            f"user={app.current_user['id']}, "
+            f"types={selected}, "
+            f"desc='{desc}'"
+        )
+        # Phase 6: POST to FastAPI backend

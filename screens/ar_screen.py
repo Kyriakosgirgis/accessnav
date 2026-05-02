@@ -3,6 +3,8 @@ from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.label import MDLabel
 from kivymd.uix.button import MDFabButton
 from kivy.uix.floatlayout import FloatLayout
+from kivy.clock import Clock
+from kivymd.app import MDApp
 
 
 class ARScreen(MDScreen):
@@ -10,17 +12,31 @@ class ARScreen(MDScreen):
         super().__init__(**kwargs)
         self.build_ui()
 
+    # ------------------------------------------------------------------ #
+    #  Auth guard                                                          #
+    # ------------------------------------------------------------------ #
+
+    def _on_authenticated(self):
+        """Called only when a valid session exists. Put camera/AR init here."""
+        print("[ARScreen] Auth OK — camera and compass init goes here (Phase 5)")
+
+    def on_leave(self, *args):
+        """Stop camera and sensors when leaving the screen."""
+        print("[ARScreen] Leaving — stopping sensors (Phase 5)")
+
+    # ------------------------------------------------------------------ #
+    #  UI                                                                  #
+    # ------------------------------------------------------------------ #
+
     def build_ui(self):
         root = FloatLayout()
 
-        # Camera placeholder background
         cam_bg = MDBoxLayout(md_bg_color=(0.08, 0.08, 0.10, 1))
         root.add_widget(cam_bg)
 
-        # Camera label
         root.add_widget(
             MDLabel(
-                text="[b]Camera feed[/b]\nLive AR overlay — Phase 3",
+                text="[b]Camera feed[/b]\nLive AR overlay — Phase 5",
                 markup=True,
                 halign="center",
                 theme_text_color="Custom",
@@ -28,7 +44,6 @@ class ARScreen(MDScreen):
             )
         )
 
-        # AR arrow placeholder
         arrow_hint = MDBoxLayout(
             orientation="vertical",
             size_hint=(None, None),
@@ -49,7 +64,6 @@ class ARScreen(MDScreen):
         )
         root.add_widget(arrow_hint)
 
-        # HUD distance card
         hud = MDBoxLayout(
             orientation="vertical",
             size_hint=(0.6, None),
@@ -81,16 +95,20 @@ class ARScreen(MDScreen):
         )
         root.add_widget(hud)
 
-        # Stop navigation FAB
-        stop_btn = MDFabButton(
-            icon="close",
-            style="small",
-            pos_hint={"center_x": 0.5, "y": 0.04},
-            on_release=self.stop_navigation,
+        root.add_widget(
+            MDFabButton(
+                icon="close",
+                style="small",
+                pos_hint={"center_x": 0.5, "y": 0.04},
+                on_release=self.stop_navigation,
+            )
         )
-        root.add_widget(stop_btn)
 
         self.add_widget(root)
+
+    # ------------------------------------------------------------------ #
+    #  Actions                                                             #
+    # ------------------------------------------------------------------ #
 
     def stop_navigation(self, *args):
         self.manager.current = "map"
