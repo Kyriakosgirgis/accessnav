@@ -67,7 +67,6 @@ class AccessNavApp(MDApp):
         sm.add_widget(ARScreen(name="ar"))
         sm.add_widget(ReportScreen(name="report"))
 
-        # Restore session if one exists, otherwise go to login
         saved = self.session.load()
         if saved:
             self.current_user = saved
@@ -80,14 +79,12 @@ class AccessNavApp(MDApp):
         return root
 
     def login(self, user) -> None:
-        """Call this from LoginScreen and RegisterScreen after auth succeeds."""
         self.current_user = user.to_dict()
         self.session.save(user)
         self._show_nav(True)
         self.root.ids.screen_manager.current = "map"
 
     def logout(self) -> None:
-        """Call this from anywhere to log the user out."""
         self.current_user = None
         self.session.clear()
         self._show_nav(False)
@@ -101,7 +98,6 @@ class AccessNavApp(MDApp):
             self.root.ids.screen_manager.current = item.name
 
     def _show_nav(self, visible: bool, root=None) -> None:
-        """Show or hide the bottom nav bar based on login state."""
         nav = (root or self.root).ids.nav_bar
         nav.size_hint_y = None if visible else 0
         nav.opacity = 1 if visible else 0

@@ -20,14 +20,14 @@ class ReportScreen(MDScreen):
     #  Auth guard                                                          #
     # ------------------------------------------------------------------ #
     def on_enter(self, *args):
-        from kivymd.app import MDApp
         app = MDApp.get_running_app()
         if not app.is_logged_in():
-            self.manager.current = "login"
+            from kivy.clock import Clock
+            Clock.schedule_once(lambda dt: setattr(self.manager, "current", "login"), 0)
             return
+        self._on_authenticated()
 
     def _on_authenticated(self):
-        """Called only when a valid session exists."""
         print("[ReportScreen] Auth OK — ready to accept reports")
 
     # ------------------------------------------------------------------ #

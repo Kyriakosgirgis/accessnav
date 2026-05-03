@@ -16,8 +16,15 @@ class ARScreen(MDScreen):
     #  Auth guard                                                          #
     # ------------------------------------------------------------------ #
 
+    def on_enter(self, *args):
+        app = MDApp.get_running_app()
+        if not app.is_logged_in():
+            from kivy.clock import Clock
+            Clock.schedule_once(lambda dt: setattr(self.manager, "current", "login"), 0)
+            return
+        self._on_authenticated()
+
     def _on_authenticated(self):
-        """Called only when a valid session exists. Put camera/AR init here."""
         print("[ARScreen] Auth OK — camera and compass init goes here (Phase 5)")
 
     def on_leave(self, *args):
