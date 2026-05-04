@@ -5,6 +5,7 @@ from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.textinput import TextInput
 from kivy.clock import Clock
 from kivy.metrics import dp, sp
+from kivy.graphics import Color, Ellipse
 
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.boxlayout import MDBoxLayout
@@ -35,20 +36,38 @@ VIEWBOX = (32.95, 34.63, 33.15, 34.72)
 # ------------------------------------------------------------------ #
 
 class POIMarker(MapMarker):
-    """Custom marker for accessibility POI with color coding."""
+
     def __init__(self, lat, lon, feature_type="ramp", **kwargs):
         super().__init__(lat=lat, lon=lon, **kwargs)
         self.feature_type = feature_type
-        
-        # Color based on type
-        color_map = {
-            "ramp": (0.11, 0.62, 0.46, 1),
-            "elevator": (0.22, 0.47, 0.87, 1),
-            "barrier": (0.89, 0.35, 0.19, 1),
-        }
-        
-        self.color = color_map.get(feature_type, (0.5, 0.5, 0.5, 1))
 
+        # Size of the dot
+        self.size = (dp(18), dp(18))
+        self.anchor_x = 0.5
+        self.anchor_y = 0.5
+
+        color_map = {
+            "ramp": (0.18, 0.62, 0.38, 1),
+            "elevator": (0.27, 0.49, 0.85, 1),
+            "barrier": (0.88, 0.36, 0.20, 1),
+        }
+
+        color = color_map.get(feature_type, (0.5, 0.5, 0.5, 1))
+
+        with self.canvas:
+            # White border (like your legend style)
+            Color(1, 1, 1, 1)
+            self.bg = Ellipse(size=(dp(20), dp(20)), pos=self.pos)
+
+            # Inner colored dot
+            Color(*color)
+            self.dot = Ellipse(size=(dp(14), dp(14)), pos=self.pos)
+
+        self.bind(pos=self._update)
+
+    def _update(self, *args):
+        self.bg.pos = self.pos
+        self.dot.pos = self.pos
 
 # ------------------------------------------------------------------ #
 #  Tappable row                                                        #
@@ -637,22 +656,30 @@ class MapScreen(MDScreen):
     # ------------------------------------------------------------------ #
     #  POI markers (Accessibility features)                               #
     # ------------------------------------------------------------------ #
-
     def _fetch_poi_markers(self, lat, lon):
-        """Fetch accessibility features around current location."""
-        # Calculate bbox around current location (smaller area for testing)
-        lat_offset = 0.005  # ~500m
-        lon_offset = 0.005
-        
+        """Fetch accessibility features around current location (optimized)."""
+
+        # Only refetch if user moved enough (prevents spam)
+        if hasattr(self, "_last_poi_fetch"):
+            last_lat, last_lon = self._last_poi_fetch
+            if abs(lat - last_lat) < 0.001 and abs(lon - last_lon) < 0.001:
+                return  # user hasn't moved enough
+
+        self._last_poi_fetch = (lat, lon)
+
+        # Small bounding box (~300–400m)
+        lat_offset = 0.003
+        lon_offset = 0.003
+
         bbox = (
             lon - lon_offset,
             lat - lat_offset,
             lon + lon_offset,
             lat + lat_offset,
         )
-        
-        print(f"[MapScreen] Fetching POI markers for bbox: {bbox}")
-        print(f"[MapScreen] Center: {lat:.5f}, {lon:.5f}")
+
+        print(f"[MapScreen] Fetching LOCAL POIs for bbox: {bbox}")
+
         self.osm.fetch_accessibility_features(
             bbox=bbox,
             on_results=self._on_poi_results,
