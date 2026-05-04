@@ -25,8 +25,29 @@ from kivy_garden.mapview import MapView, MapMarker
 
 from services.gps_service import GPSService
 from services.geocoding_service import GeocodingService
+from services.osm_service import OSMService
 
 VIEWBOX = (32.95, 34.63, 33.15, 34.72)
+
+
+# ------------------------------------------------------------------ #
+#  POI Marker                                                           #
+# ------------------------------------------------------------------ #
+
+class POIMarker(MapMarker):
+    """Custom marker for accessibility POI with color coding."""
+    def __init__(self, lat, lon, feature_type="ramp", **kwargs):
+        super().__init__(lat=lat, lon=lon, **kwargs)
+        self.feature_type = feature_type
+        
+        # Color based on type
+        color_map = {
+            "ramp": (0.11, 0.62, 0.46, 1),
+            "elevator": (0.22, 0.47, 0.87, 1),
+            "barrier": (0.89, 0.35, 0.19, 1),
+        }
+        
+        self.color = color_map.get(feature_type, (0.5, 0.5, 0.5, 1))
 
 
 # ------------------------------------------------------------------ #
@@ -50,6 +71,7 @@ class MapScreen(MDScreen):
         super().__init__(**kwargs)
         self.gps            = GPSService()
         self.geocoder       = GeocodingService()
+        self.osm            = OSMService()
         self.map_view       = None
         self.user_marker    = None
         self.dest_marker    = None
@@ -58,6 +80,8 @@ class MapScreen(MDScreen):
         self._search_event  = None
         self._searching     = False   # lock — prevents dropdown reopening
         self.destination    = None
+        self.poi_markers    = []  # Store POI markers for cleanup
+        self.poi_visible    = True  # Track POI marker visibility
         self.build_ui()
 
     # ------------------------------------------------------------------ #
@@ -75,6 +99,8 @@ class MapScreen(MDScreen):
 
     def on_leave(self, *args):
         self.gps.stop()
+        self.osm.cancel()
+        self._clear_poi_markers()
         self._first_fix = False
 
     def _on_authenticated(self):
@@ -355,6 +381,17 @@ class MapScreen(MDScreen):
             )
         )
 
+        # ── POI Toggle FAB ────────────────────────────────────── #
+        self.poi_toggle = MDFabButton(
+            icon="map-marker-multiple",
+            pos_hint={"x": 0.05, "y": 0.12},
+            on_release=self._toggle_poi_markers,
+            size_hint=(None, None),
+            size=(dp(48), dp(48)),
+            md_bg_color=(0.2, 0.8, 0.2, 1),  # Green to indicate POI
+        )
+        root.add_widget(self.poi_toggle)
+
         self.add_widget(root)
 
     # ------------------------------------------------------------------ #
@@ -598,6 +635,94 @@ class MapScreen(MDScreen):
         self.map_view.center_on(lat, lon)
 
     # ------------------------------------------------------------------ #
+    #  POI markers (Accessibility features)                               #
+    # ------------------------------------------------------------------ #
+
+    def _fetch_poi_markers(self, lat, lon):
+        """Fetch accessibility features around current location."""
+        # Calculate bbox around current location (smaller area for testing)
+        lat_offset = 0.005  # ~500m
+        lon_offset = 0.005
+        
+        bbox = (
+            lon - lon_offset,
+            lat - lat_offset,
+            lon + lon_offset,
+            lat + lat_offset,
+        )
+        
+        print(f"[MapScreen] Fetching POI markers for bbox: {bbox}")
+        print(f"[MapScreen] Center: {lat:.5f}, {lon:.5f}")
+        self.osm.fetch_accessibility_features(
+            bbox=bbox,
+            on_results=self._on_poi_results,
+            on_error=self._on_poi_error,
+        )
+
+    def _on_poi_results(self, features):
+        """Add fetched POI markers to the map."""
+        self._clear_poi_markers()
+        
+        print(f"[MapScreen] Got {len(features)} POI features from OSM")
+        
+        for feature in features:
+            try:
+                marker = POIMarker(
+                    lat=feature["lat"],
+                    lon=feature["lon"],
+                    feature_type=feature["type"],
+                )
+                
+                # Store feature metadata
+                marker.feature_name = feature.get("name", feature["type"].title())
+                marker.feature_data = feature  # Store full feature data
+                
+                # Make marker tappable
+                marker.bind(on_release=self._on_poi_marker_tap)
+                
+                self.map_view.add_marker(marker)
+                self.poi_markers.append(marker)
+                
+                print(f"[MapScreen] Added {feature['type']} at {feature['lat']:.5f}, {feature['lon']:.5f}")
+                
+            except Exception as e:
+                print(f"[MapScreen] Error adding POI marker: {e}")
+
+    def _on_poi_marker_tap(self, marker):
+        """Handle POI marker tap - show feature information."""
+        try:
+            feature_name = getattr(marker, 'feature_name', 'POI')
+            feature_type = getattr(marker, 'feature_type', 'unknown')
+            
+            # Show a simple dialog or toast with feature info
+            from kivymd.uix.snackbar import MDSnackbar, MDSnackbarText
+            
+            MDSnackbar(
+                MDSnackbarText(
+                    text=f"{feature_name} ({feature_type.title()})",
+                ),
+                duration=2,
+            ).open()
+            
+            print(f"[MapScreen] Tapped POI: {feature_name} ({feature_type})")
+            
+        except Exception as e:
+            print(f"[MapScreen] Error handling POI tap: {e}")
+
+    def _on_poi_error(self, message):
+        """Handle POI fetch errors."""
+        print(f"[MapScreen] POI fetch error: {message}")
+
+    def _clear_poi_markers(self):
+        """Remove all POI markers from the map."""
+        for marker in self.poi_markers:
+            try:
+                self.map_view.remove_marker(marker)
+            except Exception:
+                pass
+        self.poi_markers.clear()
+
+    # ------------------------------------------------------------------ #
     #  GPS callbacks                                                       #
     # ------------------------------------------------------------------ #
 
@@ -612,6 +737,8 @@ class MapScreen(MDScreen):
                 "Location found", searching=False, accuracy=accuracy
             )
             Clock.schedule_once(lambda dt: self._hide_status_bar(), 3)
+            # Fetch POI markers immediately after first fix
+            self._fetch_poi_markers(lat, lon)
         self._move_user_marker(lat, lon)
         self.accuracy_label.text = f"±{accuracy:.0f}m"
 
@@ -688,3 +815,26 @@ class MapScreen(MDScreen):
     def do_logout(self, *args):
         self.gps.stop()
         MDApp.get_running_app().logout()
+
+    def _toggle_poi_markers(self, *args):
+        """Toggle POI markers visibility."""
+        self.poi_visible = not self.poi_visible
+        
+        if self.poi_visible:
+            # Show markers
+            for marker in self.poi_markers:
+                try:
+                    self.map_view.add_marker(marker)
+                except:
+                    pass
+            self.poi_toggle.md_bg_color = (0.2, 0.8, 0.2, 1)  # Green when visible
+            print("[MapScreen] POI markers shown")
+        else:
+            # Hide markers
+            for marker in self.poi_markers:
+                try:
+                    self.map_view.remove_marker(marker)
+                except:
+                    pass
+            self.poi_toggle.md_bg_color = (0.5, 0.5, 0.5, 1)  # Gray when hidden
+            print("[MapScreen] POI markers hidden")
