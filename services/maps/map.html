@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body, #map { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script>
+    // ── State ─────────────────────────────────────────────────── //
+    let map;
+    let userMarker       = null;
+    let destinationMarker = null;
+    let routePolyline    = null;
+    let accessibilityMarkers = [];
+
+    // Accessibility marker colours
+    const MARKER_COLORS = {
+      ramp:     "#1D9E75",   // teal
+      elevator: "#2278DE",   // blue
+      barrier:  "#E3591F",   // red
+    };
+
+    // ── Init ──────────────────────────────────────────────────── //
+    function initMap() {
+      map = new google.maps.Map(document.getElementById("map"), {
+        center:    { lat: 34.6786, lng: 33.0413 },
+        zoom:      16,
+        mapId:     "accessnav_map",
+
+        // Hide all default POIs and business labels for a clean look
+        styles: [
+          { featureType: "poi",            elementType: "labels",      stylers: [{ visibility: "off" }] },
+          { featureType: "transit",        elementType: "labels",      stylers: [{ visibility: "off" }] },
+          { featureType: "road",           elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+        ],
+
+        // Hide Google Maps UI clutter — we have our own
+        disableDefaultUI:    true,
+        zoomControl:         false,
+        streetViewControl:   false,
+        mapTypeControl:      false,
+        fullscreenControl:   false,
+        gestureHandling:     "greedy",   // single-finger pan on mobile
+      });
+
+      // Tell Python the map is ready
+      notifyReady();
+    }
+
+    // ── Python → JS commands ──────────────────────────────────── //
+
+    function mapCenterOn(lat, lon, zoom) {
+      map.setCenter({ lat: lat, lng: lon });
+      if (zoom) map.setZoom(zoom);
+    }
+
+    function setUserMarker(lat, lon) {
+      if (userMarker) {
+        userMarker.setPosition({ lat: lat, lng: lon });
+      } else {
+        userMarker = new google.maps.Marker({
+          position:  { lat: lat, lng: lon },
+          map:       map,
+          title:     "You are here",
+          icon: {
+            path:        google.maps.SymbolPath.CIRCLE,
+            scale:       10,
+            fillColor:   "#1D9E75",
+            fillOpacity: 1,
+            strokeColor: "#ffffff",
+            strokeWeight: 3,
+          },
+          zIndex: 999,
+        });
+      }
+    }
+
+    function setDestinationMarker(lat, lon, title) {
+      clearDestinationMarker();
+      destinationMarker = new google.maps.Marker({
+        position:  { lat: lat, lng: lon },
+        map:       map,
+        title:     title,
+        animation: google.maps.Animation.DROP,
+        icon: {
+          url: "https://maps.google.com/mapfiles/ms/icons/red-dot.png",
+        },
+      });
+    }
+
+    function clearDestinationMarker() {
+      if (destinationMarker) {
+        destinationMarker.setMap(null);
+        destinationMarker = null;
+      }
+    }
+
+    function drawRoute(waypointsJson) {
+      clearRoute();
+      const path = typeof waypointsJson === "string"
+        ? JSON.parse(waypointsJson)
+        : waypointsJson;
+
+      routePolyline = new google.maps.Polyline({
+        path:          path,
+        geodesic:      true,
+        strokeColor:   "#1D9E75",
+        strokeOpacity: 0.9,
+        strokeWeight:  5,
+        map:           map,
+      });
+    }
+
+    function clearRoute() {
+      if (routePolyline) {
+        routePolyline.setMap(null);
+        routePolyline = null;
+      }
+    }
+
+    function addAccessibilityMarker(lat, lon, spotType, description) {
+      const color = MARKER_COLORS[spotType] || "#888888";
+      const marker = new google.maps.Marker({
+        position: { lat: lat, lng: lon },
+        map:      map,
+        title:    description || spotType,
+        icon: {
+          path:        google.maps.SymbolPath.CIRCLE,
+          scale:       8,
+          fillColor:   color,
+          fillOpacity: 0.9,
+          strokeColor: "#ffffff",
+          strokeWeight: 2,
+        },
+      });
+
+      // Info window on tap
+      const infoWindow = new google.maps.InfoWindow({
+        content: `
+          <div style="font-family:sans-serif;padding:4px 8px;">
+            <b style="color:${color};">${spotType.toUpperCase()}</b><br>
+            <span style="font-size:13px;color:#444;">${description || "Accessibility feature"}</span>
+          </div>`,
+      });
+
+      marker.addListener("click", () => {
+        infoWindow.open({ anchor: marker, map });
+      });
+
+      accessibilityMarkers.push(marker);
+    }
+
+    function clearAccessibilityMarkers() {
+      accessibilityMarkers.forEach(m => m.setMap(null));
+      accessibilityMarkers = [];
+    }
+
+    // ── JS → Python notification ──────────────────────────────── //
+    function notifyReady() {
+      // CEF picks this up via a URL scheme interceptor
+      // On Android, use AndroidJSInterface instead
+      try {
+        window.location.href = "accessnav://map_ready";
+      } catch(e) {}
+    }
+
+  </script>
+
+  <!-- Google Maps JS API — key is injected by Python at load time -->
+  <script
+    src="https://maps.googleapis.com/maps/api/js?key=GOOGLE_MAPS_API_KEY&callback=initMap&loading=async"
+    defer>
+  </script>
+</body>
+</html>
