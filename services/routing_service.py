@@ -186,9 +186,11 @@ out skel qt;
         # ── Pass 1 — collect nodes ─────────────────────────── #
         for el in elements:
             if el["type"] == "node":
+                # Store node coords and tags so we can detect barrier nodes
                 nodes[el["id"]] = {
                     "lat": el["lat"],
                     "lon": el["lon"],
+                    "tags": el.get("tags", {}),
                 }
 
         # ── Pass 2 — collect ways ──────────────────────────── #
@@ -201,21 +203,56 @@ out skel qt;
                 continue
             ways.append({"tags": tags, "nodes": node_ids})
 
-        # ── Pass 3 — add graph nodes ───────────────────────── #
+        # ── Detect blocked nodes (barriers) ────────────────── #
+        blocked_nodes = set()
         for nid, attrs in nodes.items():
-            G.add_node(nid, lat=attrs["lat"], lon=attrs["lon"])
+            tags = attrs.get("tags", {})
+            if tags.get("barrier") in BLOCKED_BARRIERS:
+                blocked_nodes.add(nid)
+
+        # ── Pass 3 — add graph nodes (skip blocked nodes) ─── #
+        for nid, attrs in nodes.items():
+            if nid in blocked_nodes:
+                # Do not add barrier nodes to the routing graph
+                continue
+            # keep tags on graph nodes for later inspection
+            G.add_node(nid, lat=attrs["lat"], lon=attrs["lon"], tags=attrs.get("tags", {}))
 
         # ── Pass 4 — add edges ─────────────────────────────── #
+        skipped_ways = 0
+        skipped_steps = 0
+        skipped_wheelchair_no = 0
+
         for way in ways:
-            tags     = way["tags"]
+            tags = way["tags"]
             node_ids = way["nodes"]
-            weight   = self._edge_weight(tags)
+
+            # Skip ways that are explicitly blocked (barrier on way) or access=no
+            if tags.get("barrier") in BLOCKED_BARRIERS:
+                skipped_ways += 1
+                continue
+            if tags.get("access") == "no":
+                skipped_ways += 1
+                continue
+
+            # Strict exclusions: avoid steps and ways explicitly unsuitable for wheelchairs
+            if tags.get("highway") == "steps":
+                skipped_steps += 1
+                continue
+            if tags.get("wheelchair") == "no":
+                skipped_wheelchair_no += 1
+                continue
+
+            weight = self._edge_weight(tags)
 
             for i in range(len(node_ids) - 1):
                 u = node_ids[i]
                 v = node_ids[i + 1]
 
+                # Skip if node ids missing or correspond to blocked nodes
                 if u not in nodes or v not in nodes:
+                    continue
+                if u in blocked_nodes or v in blocked_nodes:
                     continue
 
                 dist = haversine(
@@ -223,14 +260,16 @@ out skel qt;
                     nodes[v]["lat"], nodes[v]["lon"],
                 )
 
-                cost   = dist * weight
+                cost = dist * weight
                 oneway = tags.get("oneway") == "yes"
 
-                G.add_edge(u, v, weight=cost, distance=dist,
-                           accessibility=weight)
-                if not oneway:
-                    G.add_edge(v, u, weight=cost, distance=dist,
-                               accessibility=weight)
+                # Only add edges between nodes that were added to G
+                if u in G.nodes and v in G.nodes:
+                    G.add_edge(u, v, weight=cost, distance=dist, accessibility=weight)
+                if (not oneway) and (v in G.nodes and u in G.nodes):
+                    G.add_edge(v, u, weight=cost, distance=dist, accessibility=weight)
+
+        print(f"[RoutingService] Skipped ways: {skipped_ways}, steps: {skipped_steps}, wheelchair=no: {skipped_wheelchair_no}")
 
         # ── Pass 5 — keep only the largest connected component #
         # Removes isolated path fragments that cause "no path"  #
@@ -391,27 +430,46 @@ out skel qt;
             edges:               [edge_data_dict, ...]
         }
         """
-        waypoints  = [origin]
+        # Build waypoints from the graph node coordinates so the route
+        # follows actual graph geometry. Node_path is a list of node IDs
+        # starting with the origin node and ending with the destination node.
+        node_coords = []
+        for nid in node_path:
+            nd = self.graph.nodes.get(nid)
+            if nd:
+                node_coords.append((nd["lat"], nd["lon"]))
+
+        # If the user's origin/destination GPS points are significantly
+        # distant from the nearest graph node, include them as endpoints
+        # so the drawn route connects to the exact locations.
+        waypoints = list(node_coords)
+        try:
+            if node_coords:
+                first = node_coords[0]
+                last = node_coords[-1]
+                if haversine(origin[0], origin[1], first[0], first[1]) > 20.0:
+                    waypoints.insert(0, origin)
+                if haversine(destination[0], destination[1], last[0], last[1]) > 20.0:
+                    waypoints.append(destination)
+            else:
+                # Fallback — no nodes (shouldn't happen) — use origin/destination
+                waypoints = [origin, destination]
+        except Exception:
+            waypoints = [origin] + waypoints + [destination]
+
         total_dist = 0.0
         total_cost = 0.0
-        edges      = []
+        edges = []
 
         for i in range(len(node_path) - 1):
-            u    = node_path[i]
-            v    = node_path[i + 1]
+            u = node_path[i]
+            v = node_path[i + 1]
             data = self.graph[u][v]
-
-            node_data = self.graph.nodes[v]
-            waypoints.append((node_data["lat"], node_data["lon"]))
-
             total_dist += data.get("distance", 0)
-            total_cost += data.get("weight",   0)
+            total_cost += data.get("weight", 0)
             edges.append(data)
 
-        waypoints.append(destination)
-
-        # Score: ratio of raw distance to weighted cost
-        # 1.0 = perfectly accessible, lower = barriers or rough surfaces
+        # Score: ratio of straight-line distance to weighted cost (clamped)
         if total_cost > 0:
             score = min(total_dist / total_cost, 1.0)
         else:
@@ -426,6 +484,7 @@ out skel qt;
             "eta_minutes":         eta,
             "accessibility_score": round(score, 2),
             "edges":               edges,
+            "node_path":           node_path,
         }
 
     # ------------------------------------------------------------------ #

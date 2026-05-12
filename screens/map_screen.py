@@ -9,6 +9,7 @@ from kivy.graphics import Color, Ellipse
 
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.boxlayout import MDBoxLayout
+from kivymd.uix.card import MDCard
 from kivymd.uix.label import MDLabel
 from kivymd.uix.button import MDFabButton, MDIconButton, MDButton, MDButtonText
 from kivymd.uix.progressindicator import MDCircularProgressIndicator
@@ -27,6 +28,9 @@ from kivy_garden.mapview import MapView, MapMarker
 from services.gps_service import GPSService
 from services.geocoding_service import GeocodingService
 from services.osm_service import OSMService
+from services.routing_service import RoutingService, haversine
+
+from components.route_layer import RouteLayer
 
 VIEWBOX = (32.95, 34.63, 33.15, 34.72)
 
@@ -91,6 +95,8 @@ class MapScreen(MDScreen):
         self.gps            = GPSService()
         self.geocoder       = GeocodingService()
         self.osm            = OSMService()
+        self.routing        = RoutingService()
+        self.route_layer    = RouteLayer()
         self.map_view       = None
         self.user_marker    = None
         self.dest_marker    = None
@@ -120,6 +126,22 @@ class MapScreen(MDScreen):
         self.gps.stop()
         self.osm.cancel()
         self._clear_poi_markers()
+        try:
+            self.route_layer.clear_route()
+        except Exception:
+            pass
+        try:
+            self._hide_route_info()
+        except Exception:
+            pass
+        try:
+            self._hide_route_info()
+        except Exception:
+            pass
+        try:
+            self._hide_route_info()
+        except Exception:
+            pass
         self._first_fix = False
 
     def _on_authenticated(self):
@@ -148,6 +170,30 @@ class MapScreen(MDScreen):
         )
         self.user_marker = MapMarker(lat=34.7071, lon=33.0226)
         self.map_view.add_marker(self.user_marker)
+        # Add a route layer to draw routes on the map
+        try:
+            # Use window mode so drawing coordinates from get_window_xy_from
+            # (absolute widget coords) map directly to the layer canvas and
+            # remain correct when panning/zooming.
+            self.map_view.add_layer(self.route_layer, mode="window")
+            # ensure the layer has a reference to the map view (used by RouteLayer)
+            self.route_layer._map_view = self.map_view
+            # ensure layer size matches map view; position at origin of map view
+            self.route_layer.size = self.map_view.size
+            self.route_layer.pos = (0, 0)
+            # Keep layer positioned and sized with the map view
+            try:
+                # Keep the layer sized to the map view when the map resizes
+                self.map_view.bind(size=lambda *a: setattr(self.route_layer, "size", self.map_view.size))
+            except Exception:
+                pass
+        except Exception:
+            # If add_layer fails for any reason, fall back to adding as a widget
+            try:
+                self.map_view.add_widget(self.route_layer)
+                self.route_layer._map_view = self.map_view
+            except Exception:
+                print("[MapScreen] Warning: could not attach RouteLayer to MapView")
         self._map_ready = True
         root.add_widget(self.map_view)
 
@@ -411,6 +457,82 @@ class MapScreen(MDScreen):
         )
         root.add_widget(self.poi_toggle)
 
+        # ── Route info card (separate nice UI box) — top-right under search ─
+        self.route_info_card = MDCard(
+            orientation="vertical",
+            size_hint=(None, None),
+            size=(dp(260), dp(72)),
+            pos_hint={"right": 0.98, "top": 0.78},
+            md_bg_color=(1, 1, 1, 0.98),
+            radius=[dp(12)],
+            padding=(dp(12), dp(8)),
+            spacing=dp(6),
+            elevation=6,
+            opacity=0,
+            height=0,
+        )
+
+        top_row = MDBoxLayout(orientation="horizontal", size_hint_y=None, height=dp(22))
+        self.route_title = MDLabel(
+            text="Route",
+            font_style="Label",
+            role="small",
+            bold=True,
+            size_hint_x=1,
+            halign="left",
+            theme_text_color="Primary",
+        )
+        close_btn = MDIconButton(
+            icon="close",
+            size_hint=(None, None),
+            size=(dp(28), dp(28)),
+            pos_hint={"center_y": 0.5},
+            on_release=lambda *_: self.stop_route(),
+        )
+        ar_btn = MDIconButton(
+            icon="camera",
+            size_hint=(None, None),
+            size=(dp(28), dp(28)),
+            pos_hint={"center_y": 0.5},
+            on_release=lambda *_: self._open_ar(),
+        )
+        top_row.add_widget(self.route_title)
+        top_row.add_widget(ar_btn)
+        top_row.add_widget(close_btn)
+
+        info_row = MDBoxLayout(orientation="horizontal", size_hint_y=None, height=dp(36))
+        self.route_distance_label = MDLabel(
+            text="",
+            font_style="Label",
+            role="small",
+            size_hint_x=0.5,
+            halign="left",
+            theme_text_color="Secondary",
+        )
+        self.route_eta_label = MDLabel(
+            text="",
+            font_style="Label",
+            role="small",
+            size_hint_x=0.3,
+            halign="center",
+            theme_text_color="Secondary",
+        )
+        self.route_score_label = MDLabel(
+            text="",
+            font_style="Label",
+            role="small",
+            size_hint_x=0.2,
+            halign="right",
+            theme_text_color="Secondary",
+        )
+        info_row.add_widget(self.route_distance_label)
+        info_row.add_widget(self.route_eta_label)
+        info_row.add_widget(self.route_score_label)
+
+        self.route_info_card.add_widget(top_row)
+        self.route_info_card.add_widget(info_row)
+        root.add_widget(self.route_info_card)
+
         self.add_widget(root)
 
     # ------------------------------------------------------------------ #
@@ -632,8 +754,9 @@ class MapScreen(MDScreen):
     def _show_dest_card(self, result):
         self.dest_name_label.text = result["name"]
         self.dest_addr_label.text = result.get("address", "Cyprus")
-        self.dest_card.height     = dp(60)
-        self.dest_card.opacity    = 1
+        # Clear any previous route info until a route is found
+        self.dest_card.height = dp(60)
+        self.dest_card.opacity = 1
 
     def _hide_dest_card(self):
         self.dest_card.height  = 0
@@ -652,6 +775,11 @@ class MapScreen(MDScreen):
         self.dest_marker = MapMarker(lat=lat, lon=lon)
         self.map_view.add_marker(self.dest_marker)
         self.map_view.center_on(lat, lon)
+        # Clear any existing drawn route when a new destination is placed
+        try:
+            self.route_layer.clear_route()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     #  POI markers (Accessibility features)                               #
@@ -817,6 +945,10 @@ class MapScreen(MDScreen):
                 self.dest_marker = None
             except Exception:
                 pass
+        try:
+            self.route_layer.clear_route()
+        except Exception:
+            pass
 
     def centre_on_user(self, *args):
         lat, lon = self.gps.get_location()
@@ -831,13 +963,36 @@ class MapScreen(MDScreen):
             f"[MapScreen] Navigating to {self.destination['name']} "
             f"({self.destination['lat']:.5f}, {self.destination['lon']:.5f})"
         )
-        ar = self.manager.get_screen("ar")
-        lat, lon = self.gps.get_location()
-        ar.set_route([
-            (lat, lon),
-            (self.destination["lat"], self.destination["lon"]),
-        ])
-        self.manager.current = "ar"
+        # Build routing graph around current location then compute route.
+        origin = self.gps.get_location()
+        dest = (self.destination["lat"], self.destination["lon"])
+
+        # UI feedback
+        self._show_status("Finding route…", searching=True)
+
+        def _on_graph_ready():
+            # Graph built — run pathfinder
+            try:
+                self.routing.find_route(
+                    origin,
+                    dest,
+                    on_route=self._on_route,
+                    on_error=self._on_route_error,
+                )
+            except Exception as e:
+                print(f"[MapScreen] Routing find error: {e}")
+                self._on_route_error("Routing failed to start")
+
+        # Start building graph (background). Use a reasonable radius.
+        try:
+            self.routing.build_graph(
+                lat=origin[0], lon=origin[1], radius=1200,
+                on_ready=_on_graph_ready,
+                on_error=lambda msg: self._on_route_error(msg),
+            )
+        except Exception as e:
+            print(f"[MapScreen] Routing build error: {e}")
+            self._on_route_error("Could not start routing")
 
     def do_logout(self, *args):
         self.gps.stop()
@@ -865,3 +1020,174 @@ class MapScreen(MDScreen):
                     pass
             self.poi_toggle.md_bg_color = (0.5, 0.5, 0.5, 1)  # Gray when hidden
             print("[MapScreen] POI markers hidden")
+
+    # ------------------------------------------------------------------ #
+    #  Routing callbacks                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _on_route(self, result):
+        """Called when RoutingService finds a route.
+
+        result: dict with keys 'waypoints', 'distance_m', 'eta_minutes',
+                'accessibility_score', 'edges'
+        """
+        try:
+            waypoints = result.get("waypoints", [])
+            score = result.get("accessibility_score", 1.0)
+
+            # Validate route: must contain at least two waypoints and some edges
+            if not waypoints or len(waypoints) < 2 or not result.get("edges"):
+                print("[MapScreen] Invalid route result — refusing to draw")
+                self._on_route_error("Invalid route")
+                return
+
+            # Additional sanity checks on distance to avoid spurious routes
+            dist = result.get("distance_m", 0.0)
+            if dist < 5.0:
+                print(f"[MapScreen] Route too short ({dist:.1f}m) — refusing to draw")
+                self._on_route_error("Route too short")
+                return
+            if dist > 100_000:
+                print(f"[MapScreen] Route implausibly long ({dist:.0f}m) — refusing to draw")
+                self._on_route_error("Route implausibly long")
+                return
+
+            # Draw the validated route on map
+            try:
+                # Ensure waypoints are (lat, lon) tuples
+                print(f"[MapScreen] Drawing route with {len(waypoints)} waypoints. RouteLayer map ref: {hasattr(self.route_layer, '_map_view') and self.route_layer._map_view is not None}")
+                # Ensure the layer knows the map view (defensive)
+                try:
+                    self.route_layer._map_view = self.map_view
+                except Exception:
+                    pass
+                self.route_layer.set_route(waypoints, score=score)
+                # Force an invalidate in case MapView didn't call reposition yet
+                try:
+                    self.route_layer.invalidate()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[MapScreen] Error setting route on layer: {e}")
+
+            # Centre map on midpoint of route for better visibility
+            try:
+                mid = waypoints[len(waypoints) // 2]
+                self.map_view.center_on(mid[0], mid[1])
+            except Exception:
+                pass
+
+            # Update destination card and separate route info box with route summary
+            try:
+                dist = result.get("distance_m", 0.0)
+                eta = result.get("eta_minutes", 0.0)
+                summary = f"{dist:.0f} m · {eta:.0f} min · score: {score:.2f}"
+                self._show_route_info(result)
+            except Exception:
+                pass
+
+            # Hide searching status
+            self._hide_status_bar()
+
+            # Do NOT automatically switch to AR — user can open AR via the card
+            # (If AR screen is available we keep the route available but do not switch)
+            try:
+                ar = self.manager.get_screen("ar")
+                if hasattr(ar, "set_route"):
+                    ar.set_route(waypoints)
+            except Exception:
+                pass
+
+        except Exception as e:
+            print(f"[MapScreen] _on_route error: {e}")
+
+    def _on_route_error(self, message):
+        print(f"[MapScreen] Route error: {message}")
+        # Fallback: draw a simple straight line between origin and dest
+        try:
+            origin = self.gps.get_location()
+            dest = (self.destination["lat"], self.destination["lon"]) if self.destination else None
+            if dest:
+                fallback = [origin, dest]
+                try:
+                    try:
+                        self.route_layer._map_view = self.map_view
+                    except Exception:
+                        pass
+                    self.route_layer.set_route(fallback, score=0.5)
+                    try:
+                        self.route_layer.invalidate()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            # Hide status and show minimal info box for fallback
+            self._hide_status_bar()
+            try:
+                self._show_route_info({
+                    "waypoints": fallback,
+                    "distance_m": haversine(origin[0], origin[1], dest[0], dest[1]) if dest else 0,
+                    "eta_minutes": (haversine(origin[0], origin[1], dest[0], dest[1]) / 60.0) if dest else 0,
+                    "accessibility_score": 0.5,
+                })
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[MapScreen] Fallback routing failed: {e}")
+
+    def _show_route_info(self, result):
+        """Populate and show the floating route info card."""
+        try:
+            dist = result.get("distance_m", 0.0)
+            eta = result.get("eta_minutes", 0.0)
+            score = result.get("accessibility_score", 0.0)
+            self.route_distance_label.text = f"{dist:.0f} m"
+            self.route_eta_label.text = f"{eta:.0f} min"
+            self.route_score_label.text = f"{score:.2f}"
+
+            # Make card visible
+            self.route_info_card.opacity = 1
+            self.route_info_card.height = dp(72)
+        except Exception as e:
+            print(f"[MapScreen] _show_route_info error: {e}")
+
+    def _hide_route_info(self):
+        try:
+            self.route_info_card.opacity = 0
+            self.route_info_card.height = 0
+            self.route_distance_label.text = ""
+            self.route_eta_label.text = ""
+            self.route_score_label.text = ""
+        except Exception:
+            pass
+
+    def stop_route(self, *args):
+        """Stop navigation: clear drawn route and hide info box."""
+        try:
+            if self.route_layer:
+                self.route_layer.clear_route()
+        except Exception:
+            pass
+        try:
+            self._hide_route_info()
+        except Exception:
+            pass
+        # Return to map screen if not already
+        try:
+            self.manager.current = "map"
+        except Exception:
+            pass
+
+    def _open_ar(self):
+        """Open the AR screen and pass the current route if available."""
+        try:
+            ar = self.manager.get_screen("ar")
+            # forward the route if the AR screen can accept it
+            if self.route_layer and hasattr(ar, "set_route"):
+                # route stored on layer
+                waypoints = getattr(self.route_layer, "_waypoints", None)
+                if waypoints:
+                    ar.set_route(waypoints)
+            self.manager.current = "ar"
+        except Exception as e:
+            print(f"[MapScreen] _open_ar failed: {e}")
