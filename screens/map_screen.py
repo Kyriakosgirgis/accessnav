@@ -14,6 +14,7 @@ from kivymd.uix.label import MDLabel
 from kivymd.uix.button import MDFabButton, MDIconButton, MDButton, MDButtonText
 from kivymd.uix.progressindicator import MDCircularProgressIndicator
 from kivymd.uix.divider import MDDivider
+from kivymd.uix.snackbar import MDSnackbar, MDSnackbarText
 from kivymd.uix.appbar import (
     MDTopAppBar,
     MDTopAppBarTitle,
@@ -28,7 +29,7 @@ from kivy_garden.mapview import MapView, MapMarker
 from services.gps_service import GPSService
 from services.geocoding_service import GeocodingService
 from services.osm_service import OSMService
-from services.routing_service import RoutingService, haversine
+from services.routing_service import RoutingService
 
 from components.route_layer import RouteLayer
 
@@ -36,7 +37,7 @@ VIEWBOX = (32.95, 34.63, 33.15, 34.72)
 
 
 # ------------------------------------------------------------------ #
-#  POI Marker                                                           #
+#  POI Marker                                                          #
 # ------------------------------------------------------------------ #
 
 class POIMarker(MapMarker):
@@ -44,34 +45,29 @@ class POIMarker(MapMarker):
     def __init__(self, lat, lon, feature_type="ramp", **kwargs):
         super().__init__(lat=lat, lon=lon, **kwargs)
         self.feature_type = feature_type
-
-        # Size of the dot
-        self.size = (dp(18), dp(18))
+        self.size     = (dp(18), dp(18))
         self.anchor_x = 0.5
         self.anchor_y = 0.5
 
         color_map = {
-            "ramp": (0.18, 0.62, 0.38, 1),
+            "ramp":     (0.18, 0.62, 0.38, 1),
             "elevator": (0.27, 0.49, 0.85, 1),
-            "barrier": (0.88, 0.36, 0.20, 1),
+            "barrier":  (0.88, 0.36, 0.20, 1),
         }
-
         color = color_map.get(feature_type, (0.5, 0.5, 0.5, 1))
 
         with self.canvas:
-            # White border (like your legend style)
             Color(1, 1, 1, 1)
-            self.bg = Ellipse(size=(dp(20), dp(20)), pos=self.pos)
-
-            # Inner colored dot
+            self.bg  = Ellipse(size=(dp(20), dp(20)), pos=self.pos)
             Color(*color)
             self.dot = Ellipse(size=(dp(14), dp(14)), pos=self.pos)
 
         self.bind(pos=self._update)
 
     def _update(self, *args):
-        self.bg.pos = self.pos
-        self.dot.pos = self.pos
+        self.bg.pos  = self.pos
+        self.dot.pos = (self.pos[0] + dp(3), self.pos[1] + dp(3))
+
 
 # ------------------------------------------------------------------ #
 #  Tappable row                                                        #
@@ -83,6 +79,22 @@ class TappableRow(ButtonBehavior, MDBoxLayout):
 
     def on_release(self):
         self.md_bg_color = (1, 1, 1, 1)
+
+
+# ------------------------------------------------------------------ #
+#  Helpers                                                             #
+# ------------------------------------------------------------------ #
+
+def _haversine(lat1, lon1, lat2, lon2):
+    import math
+    R    = 6_371_000
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a    = (math.sin(dphi / 2) ** 2
+            + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 # ------------------------------------------------------------------ #
@@ -103,10 +115,11 @@ class MapScreen(MDScreen):
         self._map_ready     = False
         self._first_fix     = False
         self._search_event  = None
-        self._searching     = False   # lock — prevents dropdown reopening
+        self._searching     = False
+        self._routing       = False
         self.destination    = None
-        self.poi_markers    = []  # Store POI markers for cleanup
-        self.poi_visible    = True  # Track POI marker visibility
+        self.poi_markers    = []
+        self.poi_visible    = True
         self.build_ui()
 
     # ------------------------------------------------------------------ #
@@ -125,17 +138,10 @@ class MapScreen(MDScreen):
     def on_leave(self, *args):
         self.gps.stop()
         self.osm.cancel()
+        self.routing.cancel()
         self._clear_poi_markers()
         try:
             self.route_layer.clear_route()
-        except Exception:
-            pass
-        try:
-            self._hide_route_info()
-        except Exception:
-            pass
-        try:
-            self._hide_route_info()
         except Exception:
             pass
         try:
@@ -154,7 +160,7 @@ class MapScreen(MDScreen):
         )
 
     # ------------------------------------------------------------------ #
-    #  Build UI                                                            #
+    #  Build UI — unchanged from your file                                #
     # ------------------------------------------------------------------ #
 
     def build_ui(self):
@@ -170,30 +176,27 @@ class MapScreen(MDScreen):
         )
         self.user_marker = MapMarker(lat=34.7071, lon=33.0226)
         self.map_view.add_marker(self.user_marker)
-        # Add a route layer to draw routes on the map
+
         try:
-            # Use window mode so drawing coordinates from get_window_xy_from
-            # (absolute widget coords) map directly to the layer canvas and
-            # remain correct when panning/zooming.
             self.map_view.add_layer(self.route_layer, mode="window")
-            # ensure the layer has a reference to the map view (used by RouteLayer)
             self.route_layer._map_view = self.map_view
-            # ensure layer size matches map view; position at origin of map view
-            self.route_layer.size = self.map_view.size
-            self.route_layer.pos = (0, 0)
-            # Keep layer positioned and sized with the map view
+            self.route_layer.size      = self.map_view.size
+            self.route_layer.pos       = (0, 0)
             try:
-                # Keep the layer sized to the map view when the map resizes
-                self.map_view.bind(size=lambda *a: setattr(self.route_layer, "size", self.map_view.size))
+                self.map_view.bind(
+                    size=lambda *a: setattr(
+                        self.route_layer, "size", self.map_view.size
+                    )
+                )
             except Exception:
                 pass
         except Exception:
-            # If add_layer fails for any reason, fall back to adding as a widget
             try:
                 self.map_view.add_widget(self.route_layer)
                 self.route_layer._map_view = self.map_view
             except Exception:
-                print("[MapScreen] Warning: could not attach RouteLayer to MapView")
+                print("[MapScreen] Warning: could not attach RouteLayer")
+
         self._map_ready = True
         root.add_widget(self.map_view)
 
@@ -218,18 +221,16 @@ class MapScreen(MDScreen):
         )
 
         # ── Search pill ───────────────────────────────────────── #
-        # Fully pill-shaped search bar (radius = half height)
         search_pill = MDBoxLayout(
             orientation="horizontal",
             size_hint=(0.92, None),
             height=dp(48),
             pos_hint={"center_x": 0.5, "top": 0.87},
             md_bg_color=(1, 1, 1, 1),
-            radius=[dp(24)],          # full pill
+            radius=[dp(24)],
             padding=(dp(8), dp(6), dp(8), dp(6)),
             spacing=dp(4),
         )
-
         search_pill.add_widget(
             MDIconButton(
                 icon="magnify",
@@ -240,7 +241,6 @@ class MapScreen(MDScreen):
                 pos_hint={"center_y": 0.5},
             )
         )
-
         self.search_field = TextInput(
             hint_text="Where to?",
             hint_text_color=(0.75, 0.75, 0.75, 1),
@@ -255,7 +255,6 @@ class MapScreen(MDScreen):
         )
         self.search_field.bind(text=self._on_search_text)
         search_pill.add_widget(self.search_field)
-
         self.search_spinner = MDCircularProgressIndicator(
             size_hint=(None, None),
             size=(dp(20), dp(20)),
@@ -263,7 +262,6 @@ class MapScreen(MDScreen):
             opacity=0,
         )
         search_pill.add_widget(self.search_spinner)
-
         self.clear_btn = MDIconButton(
             icon="close-circle-outline",
             theme_icon_color="Custom",
@@ -297,8 +295,7 @@ class MapScreen(MDScreen):
         self.dropdown_scroll.add_widget(self.dropdown_list)
         root.add_widget(self.dropdown_scroll)
 
-        # ── Destination strip ─────────────────────────────────── #
-        # Appears below the search pill after picking a result
+        # ── Destination card ──────────────────────────────────── #
         self.dest_card = MDBoxLayout(
             orientation="horizontal",
             size_hint=(0.92, None),
@@ -310,8 +307,6 @@ class MapScreen(MDScreen):
             padding=(dp(12), dp(8), dp(12), dp(8)),
             spacing=dp(10),
         )
-
-        # Pin icon
         self.dest_card.add_widget(
             MDIconButton(
                 icon="map-marker",
@@ -322,8 +317,6 @@ class MapScreen(MDScreen):
                 pos_hint={"center_y": 0.5},
             )
         )
-
-        # Name + address
         dest_text = MDBoxLayout(orientation="vertical", size_hint_x=1)
         self.dest_name_label = MDLabel(
             text="",
@@ -349,18 +342,15 @@ class MapScreen(MDScreen):
         dest_text.add_widget(self.dest_name_label)
         dest_text.add_widget(self.dest_addr_label)
         self.dest_card.add_widget(dest_text)
-
-        # Go button
-        self.dest_card.add_widget(
-            MDButton(
-                MDButtonText(text="Go"),
-                style="filled",
-                size_hint=(None, None),
-                size=(dp(52), dp(36)),
-                pos_hint={"center_y": 0.5},
-                on_release=self.start_navigation,
-            )
+        self.go_btn = MDButton(
+            MDButtonText(text="Go"),
+            style="filled",
+            size_hint=(None, None),
+            size=(dp(52), dp(36)),
+            pos_hint={"center_y": 0.5},
+            on_release=self.start_navigation,
         )
+        self.dest_card.add_widget(self.go_btn)
         root.add_widget(self.dest_card)
 
         # ── GPS status bar ────────────────────────────────────── #
@@ -399,7 +389,7 @@ class MapScreen(MDScreen):
         self.status_bar.add_widget(self.accuracy_label)
         root.add_widget(self.status_bar)
 
-        # ── Legend — centred pill ─────────────────────────────── #
+        # ── Legend ────────────────────────────────────────────── #
         legend = MDBoxLayout(
             orientation="horizontal",
             size_hint=(None, None),
@@ -453,16 +443,19 @@ class MapScreen(MDScreen):
             on_release=self._toggle_poi_markers,
             size_hint=(None, None),
             size=(dp(48), dp(48)),
-            md_bg_color=(0.2, 0.8, 0.2, 1),  # Green to indicate POI
+            md_bg_color=(0.2, 0.8, 0.2, 1),
         )
         root.add_widget(self.poi_toggle)
 
-        # ── Route info card (separate nice UI box) — top-right under search ─
+        # ── Route info card ───────────────────────────────────── #
         self.route_info_card = MDCard(
             orientation="vertical",
             size_hint=(None, None),
             size=(dp(260), dp(72)),
-            pos_hint={"right": 0.98, "top": 0.78},
+            # Move the route info card lower on the screen to avoid
+            # overlapping the top UI elements. 'y' places the card a
+            # fraction above the bottom of the screen.
+            pos_hint={"right": 0.98, "y": 0.22},
             md_bg_color=(1, 1, 1, 0.98),
             radius=[dp(12)],
             padding=(dp(12), dp(8)),
@@ -472,7 +465,11 @@ class MapScreen(MDScreen):
             height=0,
         )
 
-        top_row = MDBoxLayout(orientation="horizontal", size_hint_y=None, height=dp(22))
+        top_row = MDBoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(22),
+        )
         self.route_title = MDLabel(
             text="Route",
             font_style="Label",
@@ -500,7 +497,11 @@ class MapScreen(MDScreen):
         top_row.add_widget(ar_btn)
         top_row.add_widget(close_btn)
 
-        info_row = MDBoxLayout(orientation="horizontal", size_hint_y=None, height=dp(36))
+        info_row = MDBoxLayout(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(36),
+        )
         self.route_distance_label = MDLabel(
             text="",
             font_style="Label",
@@ -540,21 +541,16 @@ class MapScreen(MDScreen):
     # ------------------------------------------------------------------ #
 
     def _on_search_text(self, field, text):
-        # If we just picked a result, ignore the text change it caused
         if self._searching:
             return
-
         self.clear_btn.opacity = 1 if text else 0
-
         if self._search_event:
             self._search_event.cancel()
-
         if not text.strip():
             self._close_dropdown()
             self.geocoder.cancel()
             self.search_spinner.opacity = 0
             return
-
         self._search_event = Clock.schedule_once(
             lambda dt: self._do_search(text), 0.6
         )
@@ -571,14 +567,12 @@ class MapScreen(MDScreen):
     def _on_results(self, results):
         self.search_spinner.opacity = 0
         self._close_dropdown()
-
         if not results:
             self._add_message_row(
                 "No places found. Try a different search.", error=False
             )
             self._open_dropdown(1)
             return
-
         for r in results:
             self._add_result_row(r)
         self._open_dropdown(min(len(results), 4))
@@ -602,8 +596,6 @@ class MapScreen(MDScreen):
             spacing=dp(10),
             md_bg_color=(1, 1, 1, 1),
         )
-
-        # Pin icon
         row.add_widget(
             MDBoxLayout(
                 MDIconButton(
@@ -621,8 +613,6 @@ class MapScreen(MDScreen):
                 pos_hint={"center_y": 0.5},
             )
         )
-
-        # Text
         text_col = MDBoxLayout(
             orientation="vertical",
             size_hint_x=1,
@@ -654,8 +644,6 @@ class MapScreen(MDScreen):
             )
         )
         row.add_widget(text_col)
-
-        # Chevron
         row.add_widget(
             MDIconButton(
                 icon="chevron-right",
@@ -666,7 +654,6 @@ class MapScreen(MDScreen):
                 pos_hint={"center_y": 0.5},
             )
         )
-
         row.bind(on_release=lambda x, r=result: self._pick_result(r))
         self.dropdown_list.add_widget(row)
         self.dropdown_list.add_widget(
@@ -708,38 +695,31 @@ class MapScreen(MDScreen):
         self.dropdown_list.add_widget(row)
 
     def _pick_result(self, result):
-        # Set lock BEFORE changing text so _on_search_text ignores the change
-        self._searching = True
+        self._searching  = True
         self.destination = result
-
         self._close_dropdown()
         self.geocoder.cancel()
         if self._search_event:
             self._search_event.cancel()
-
-        # Update search field text — lock prevents re-triggering search
-        self.search_field.text = result["name"]
-        self.clear_btn.opacity = 1
+        self.search_field.text      = result["name"]
+        self.clear_btn.opacity      = 1
         self.search_spinner.opacity = 0
-
-        # Release lock after one frame
-        Clock.schedule_once(lambda dt: setattr(self, "_searching", False), 0.1)
-
+        Clock.schedule_once(
+            lambda dt: setattr(self, "_searching", False), 0.1
+        )
         self._place_destination_marker(result["lat"], result["lon"])
         self._show_dest_card(result)
-
         print(
             f"[MapScreen] Destination: {result['name']} "
             f"({result['lat']:.5f}, {result['lon']:.5f})"
         )
 
     # ------------------------------------------------------------------ #
-    #  Dropdown open / close                                               #
+    #  Dropdown                                                            #
     # ------------------------------------------------------------------ #
 
     def _open_dropdown(self, num_rows):
-        row_h = dp(67)
-        self.dropdown_scroll.height  = min(num_rows * row_h, dp(268))
+        self.dropdown_scroll.height  = min(num_rows * dp(67), dp(268))
         self.dropdown_scroll.opacity = 1
 
     def _close_dropdown(self):
@@ -754,9 +734,8 @@ class MapScreen(MDScreen):
     def _show_dest_card(self, result):
         self.dest_name_label.text = result["name"]
         self.dest_addr_label.text = result.get("address", "Cyprus")
-        # Clear any previous route info until a route is found
-        self.dest_card.height = dp(60)
-        self.dest_card.opacity = 1
+        self.dest_card.height     = dp(60)
+        self.dest_card.opacity    = 1
 
     def _hide_dest_card(self):
         self.dest_card.height  = 0
@@ -775,39 +754,27 @@ class MapScreen(MDScreen):
         self.dest_marker = MapMarker(lat=lat, lon=lon)
         self.map_view.add_marker(self.dest_marker)
         self.map_view.center_on(lat, lon)
-        # Clear any existing drawn route when a new destination is placed
         try:
             self.route_layer.clear_route()
         except Exception:
             pass
 
     # ------------------------------------------------------------------ #
-    #  POI markers (Accessibility features)                               #
+    #  POI markers                                                         #
     # ------------------------------------------------------------------ #
-    def _fetch_poi_markers(self, lat, lon):
-        """Fetch accessibility features around current location (optimized)."""
 
-        # Only refetch if user moved enough (prevents spam)
+    def _fetch_poi_markers(self, lat, lon):
         if hasattr(self, "_last_poi_fetch"):
             last_lat, last_lon = self._last_poi_fetch
             if abs(lat - last_lat) < 0.001 and abs(lon - last_lon) < 0.001:
-                return  # user hasn't moved enough
-
+                return
         self._last_poi_fetch = (lat, lon)
-
-        # Small bounding box (~300–400m)
-        lat_offset = 0.003
-        lon_offset = 0.003
-
-        bbox = (
-            lon - lon_offset,
-            lat - lat_offset,
-            lon + lon_offset,
-            lat + lat_offset,
+        offset = 0.003
+        bbox   = (
+            lon - offset, lat - offset,
+            lon + offset, lat + offset,
         )
-
         print(f"[MapScreen] Fetching LOCAL POIs for bbox: {bbox}")
-
         self.osm.fetch_accessibility_features(
             bbox=bbox,
             on_results=self._on_poi_results,
@@ -815,11 +782,8 @@ class MapScreen(MDScreen):
         )
 
     def _on_poi_results(self, features):
-        """Add fetched POI markers to the map."""
         self._clear_poi_markers()
-        
         print(f"[MapScreen] Got {len(features)} POI features from OSM")
-        
         for feature in features:
             try:
                 marker = POIMarker(
@@ -827,55 +791,56 @@ class MapScreen(MDScreen):
                     lon=feature["lon"],
                     feature_type=feature["type"],
                 )
-                
-                # Store feature metadata
-                marker.feature_name = feature.get("name", feature["type"].title())
-                marker.feature_data = feature  # Store full feature data
-                
-                # Make marker tappable
+                marker.feature_name = feature.get(
+                    "name", feature["type"].title()
+                )
+                marker.feature_data = feature
                 marker.bind(on_release=self._on_poi_marker_tap)
-                
                 self.map_view.add_marker(marker)
                 self.poi_markers.append(marker)
-                
-                print(f"[MapScreen] Added {feature['type']} at {feature['lat']:.5f}, {feature['lon']:.5f}")
-                
             except Exception as e:
                 print(f"[MapScreen] Error adding POI marker: {e}")
 
     def _on_poi_marker_tap(self, marker):
-        """Handle POI marker tap - show feature information."""
         try:
-            feature_name = getattr(marker, 'feature_name', 'POI')
-            feature_type = getattr(marker, 'feature_type', 'unknown')
-            
-            # Show a simple dialog or toast with feature info
-            from kivymd.uix.snackbar import MDSnackbar, MDSnackbarText
-            
+            feature_name = getattr(marker, "feature_name", "POI")
+            feature_type = getattr(marker, "feature_type", "unknown")
             MDSnackbar(
                 MDSnackbarText(
                     text=f"{feature_name} ({feature_type.title()})",
                 ),
                 duration=2,
             ).open()
-            
-            print(f"[MapScreen] Tapped POI: {feature_name} ({feature_type})")
-            
         except Exception as e:
-            print(f"[MapScreen] Error handling POI tap: {e}")
+            print(f"[MapScreen] POI tap error: {e}")
 
     def _on_poi_error(self, message):
-        """Handle POI fetch errors."""
         print(f"[MapScreen] POI fetch error: {message}")
 
     def _clear_poi_markers(self):
-        """Remove all POI markers from the map."""
         for marker in self.poi_markers:
             try:
                 self.map_view.remove_marker(marker)
             except Exception:
                 pass
         self.poi_markers.clear()
+
+    def _toggle_poi_markers(self, *args):
+        self.poi_visible = not self.poi_visible
+        if self.poi_visible:
+            for marker in self.poi_markers:
+                try:
+                    self.map_view.add_marker(marker)
+                except Exception:
+                    pass
+            self.poi_toggle.md_bg_color = (0.2, 0.8, 0.2, 1)
+        else:
+            for marker in self.poi_markers:
+                try:
+                    self.map_view.remove_marker(marker)
+                except Exception:
+                    pass
+            self.poi_toggle.md_bg_color = (0.5, 0.5, 0.5, 1)
 
     # ------------------------------------------------------------------ #
     #  GPS callbacks                                                       #
@@ -892,7 +857,6 @@ class MapScreen(MDScreen):
                 "Location found", searching=False, accuracy=accuracy
             )
             Clock.schedule_once(lambda dt: self._hide_status_bar(), 3)
-            # Fetch POI markers immediately after first fix
             self._fetch_poi_markers(lat, lon)
         self._move_user_marker(lat, lon)
         self.accuracy_label.text = f"±{accuracy:.0f}m"
@@ -921,7 +885,8 @@ class MapScreen(MDScreen):
         self.status_spinner.opacity = 1 if searching else 0
         self.accuracy_label.text    = f"±{accuracy:.0f}m" if accuracy else ""
         self.status_bar.md_bg_color = (
-            (0.11, 0.62, 0.46, 0.92) if searching else (0.4, 0.4, 0.4, 0.88)
+            (0.11, 0.62, 0.46, 0.92) if searching
+            else (0.4, 0.4, 0.4, 0.88)
         )
 
     def _hide_status_bar(self, dt=None):
@@ -935,7 +900,9 @@ class MapScreen(MDScreen):
         self._searching = True
         self.search_field.text = ""
         self.clear_btn.opacity = 0
-        Clock.schedule_once(lambda dt: setattr(self, "_searching", False), 0.1)
+        Clock.schedule_once(
+            lambda dt: setattr(self, "_searching", False), 0.1
+        )
         self._close_dropdown()
         self._hide_dest_card()
         self.destination = None
@@ -947,6 +914,7 @@ class MapScreen(MDScreen):
                 pass
         try:
             self.route_layer.clear_route()
+            self._hide_route_info()
         except Exception:
             pass
 
@@ -957,140 +925,86 @@ class MapScreen(MDScreen):
             self.map_view.zoom = 16
 
     def start_navigation(self, *args):
-        if not self.destination:
+        """Tap Go — calls ORS directly, no graph build needed."""
+        if not self.destination or self._routing:
             return
-        print(
-            f"[MapScreen] Navigating to {self.destination['name']} "
-            f"({self.destination['lat']:.5f}, {self.destination['lon']:.5f})"
-        )
-        # Build routing graph around current location then compute route.
+
+        self._routing = True
         origin = self.gps.get_location()
-        dest = (self.destination["lat"], self.destination["lon"])
+        dest   = (self.destination["lat"], self.destination["lon"])
 
-        # UI feedback
-        self._show_status("Finding route…", searching=True)
+        # Disable Go button while routing
+        self.go_btn.disabled = True
+        for child in self.go_btn.children:
+            if hasattr(child, "text"):
+                child.text = "..."
 
-        def _on_graph_ready():
-            # Graph built — run pathfinder
-            try:
-                self.routing.find_route(
-                    origin,
-                    dest,
-                    on_route=self._on_route,
-                    on_error=self._on_route_error,
-                )
-            except Exception as e:
-                print(f"[MapScreen] Routing find error: {e}")
-                self._on_route_error("Routing failed to start")
+        self._show_status("Finding route...", searching=True)
 
-        # Start building graph (background). Use a reasonable radius.
+        # Collect barrier POIs and pass them as avoid_polygons to ORS.
+        barriers = []
         try:
-            self.routing.build_graph(
-                lat=origin[0], lon=origin[1], radius=1200,
-                on_ready=_on_graph_ready,
-                on_error=lambda msg: self._on_route_error(msg),
-            )
-        except Exception as e:
-            print(f"[MapScreen] Routing build error: {e}")
-            self._on_route_error("Could not start routing")
+            for marker in self.poi_markers:
+                if getattr(marker, "feature_type", None) == "barrier":
+                    barriers.append((marker.lat, marker.lon))
+        except Exception:
+            barriers = []
+
+        self.routing.find_route(
+            origin=origin,
+            destination=dest,
+            on_route=self._on_route,
+            on_error=self._on_route_error,
+            avoid_polygons=barriers,
+            avoid_radius_m=4,
+        )
 
     def do_logout(self, *args):
         self.gps.stop()
         MDApp.get_running_app().logout()
-
-    def _toggle_poi_markers(self, *args):
-        """Toggle POI markers visibility."""
-        self.poi_visible = not self.poi_visible
-        
-        if self.poi_visible:
-            # Show markers
-            for marker in self.poi_markers:
-                try:
-                    self.map_view.add_marker(marker)
-                except:
-                    pass
-            self.poi_toggle.md_bg_color = (0.2, 0.8, 0.2, 1)  # Green when visible
-            print("[MapScreen] POI markers shown")
-        else:
-            # Hide markers
-            for marker in self.poi_markers:
-                try:
-                    self.map_view.remove_marker(marker)
-                except:
-                    pass
-            self.poi_toggle.md_bg_color = (0.5, 0.5, 0.5, 1)  # Gray when hidden
-            print("[MapScreen] POI markers hidden")
 
     # ------------------------------------------------------------------ #
     #  Routing callbacks                                                   #
     # ------------------------------------------------------------------ #
 
     def _on_route(self, result):
-        """Called when RoutingService finds a route.
+        """Called by RoutingService when ORS returns a route."""
+        self._routing        = False
+        self.go_btn.disabled = False
+        for child in self.go_btn.children:
+            if hasattr(child, "text"):
+                child.text = "Go"
 
-        result: dict with keys 'waypoints', 'distance_m', 'eta_minutes',
-                'accessibility_score', 'edges'
-        """
         try:
             waypoints = result.get("waypoints", [])
-            score = result.get("accessibility_score", 1.0)
+            score     = result.get("accessibility_score", 0.85)
+            dist      = result.get("distance_m", 0.0)
+            eta       = result.get("eta_minutes", 0.0)
 
-            # Validate route: must contain at least two waypoints and some edges
-            if not waypoints or len(waypoints) < 2 or not result.get("edges"):
-                print("[MapScreen] Invalid route result — refusing to draw")
-                self._on_route_error("Invalid route")
+            if not waypoints or len(waypoints) < 2:
+                self._on_route_error("Route returned no waypoints")
                 return
 
-            # Additional sanity checks on distance to avoid spurious routes
-            dist = result.get("distance_m", 0.0)
-            if dist < 5.0:
-                print(f"[MapScreen] Route too short ({dist:.1f}m) — refusing to draw")
-                self._on_route_error("Route too short")
-                return
-            if dist > 100_000:
-                print(f"[MapScreen] Route implausibly long ({dist:.0f}m) — refusing to draw")
-                self._on_route_error("Route implausibly long")
-                return
-
-            # Draw the validated route on map
+            # Draw route
             try:
-                # Ensure waypoints are (lat, lon) tuples
-                print(f"[MapScreen] Drawing route with {len(waypoints)} waypoints. RouteLayer map ref: {hasattr(self.route_layer, '_map_view') and self.route_layer._map_view is not None}")
-                # Ensure the layer knows the map view (defensive)
-                try:
-                    self.route_layer._map_view = self.map_view
-                except Exception:
-                    pass
+                self.route_layer._map_view = self.map_view
                 self.route_layer.set_route(waypoints, score=score)
-                # Force an invalidate in case MapView didn't call reposition yet
-                try:
-                    self.route_layer.invalidate()
-                except Exception:
-                    pass
+                self.route_layer.invalidate()
             except Exception as e:
-                print(f"[MapScreen] Error setting route on layer: {e}")
+                print(f"[MapScreen] Route draw error: {e}")
 
-            # Centre map on midpoint of route for better visibility
+            # Centre map on route midpoint
             try:
                 mid = waypoints[len(waypoints) // 2]
                 self.map_view.center_on(mid[0], mid[1])
             except Exception:
                 pass
 
-            # Update destination card and separate route info box with route summary
-            try:
-                dist = result.get("distance_m", 0.0)
-                eta = result.get("eta_minutes", 0.0)
-                summary = f"{dist:.0f} m · {eta:.0f} min · score: {score:.2f}"
-                self._show_route_info(result)
-            except Exception:
-                pass
-
-            # Hide searching status
+            # Show info card
+            self._show_route_info(result)
             self._hide_status_bar()
 
-            # Do NOT automatically switch to AR — user can open AR via the card
-            # (If AR screen is available we keep the route available but do not switch)
+            # Pass waypoints to AR screen
             try:
                 ar = self.manager.get_screen("ar")
                 if hasattr(ar, "set_route"):
@@ -1102,92 +1016,85 @@ class MapScreen(MDScreen):
             print(f"[MapScreen] _on_route error: {e}")
 
     def _on_route_error(self, message):
+        """ORS failed — draw a straight-line fallback."""
+        self._routing        = False
+        self.go_btn.disabled = False
+        for child in self.go_btn.children:
+            if hasattr(child, "text"):
+                child.text = "Go"
+
         print(f"[MapScreen] Route error: {message}")
-        # Fallback: draw a simple straight line between origin and dest
+
         try:
             origin = self.gps.get_location()
-            dest = (self.destination["lat"], self.destination["lon"]) if self.destination else None
+            dest   = (
+                self.destination["lat"],
+                self.destination["lon"],
+            ) if self.destination else None
+
             if dest:
+                fallback_dist = _haversine(
+                    origin[0], origin[1], dest[0], dest[1]
+                )
                 fallback = [origin, dest]
                 try:
-                    try:
-                        self.route_layer._map_view = self.map_view
-                    except Exception:
-                        pass
+                    self.route_layer._map_view = self.map_view
                     self.route_layer.set_route(fallback, score=0.5)
-                    try:
-                        self.route_layer.invalidate()
-                    except Exception:
-                        pass
+                    self.route_layer.invalidate()
                 except Exception:
                     pass
-            # Hide status and show minimal info box for fallback
-            self._hide_status_bar()
-            try:
                 self._show_route_info({
-                    "waypoints": fallback,
-                    "distance_m": haversine(origin[0], origin[1], dest[0], dest[1]) if dest else 0,
-                    "eta_minutes": (haversine(origin[0], origin[1], dest[0], dest[1]) / 60.0) if dest else 0,
+                    "waypoints":           fallback,
+                    "distance_m":          fallback_dist,
+                    "eta_minutes":         fallback_dist / 60.0,
                     "accessibility_score": 0.5,
                 })
-            except Exception:
-                pass
         except Exception as e:
             print(f"[MapScreen] Fallback routing failed: {e}")
 
-    def _show_route_info(self, result):
-        """Populate and show the floating route info card."""
-        try:
-            dist = result.get("distance_m", 0.0)
-            eta = result.get("eta_minutes", 0.0)
-            score = result.get("accessibility_score", 0.0)
-            self.route_distance_label.text = f"{dist:.0f} m"
-            self.route_eta_label.text = f"{eta:.0f} min"
-            self.route_score_label.text = f"{score:.2f}"
+        self._hide_status_bar()
 
-            # Make card visible
-            self.route_info_card.opacity = 1
-            self.route_info_card.height = dp(72)
+        MDSnackbar(
+            MDSnackbarText(text=message),
+            duration=4,
+        ).open()
+
+    def _show_route_info(self, result):
+        try:
+            dist  = result.get("distance_m",          0.0)
+            eta   = result.get("eta_minutes",          0.0)
+            score = result.get("accessibility_score",  0.0)
+            self.route_distance_label.text = f"{dist:.0f} m"
+            self.route_eta_label.text      = f"{eta:.0f} min"
+            self.route_score_label.text    = f"{score:.2f}"
+            self.route_info_card.opacity   = 1
+            self.route_info_card.height    = dp(72)
         except Exception as e:
             print(f"[MapScreen] _show_route_info error: {e}")
 
     def _hide_route_info(self):
         try:
-            self.route_info_card.opacity = 0
-            self.route_info_card.height = 0
-            self.route_distance_label.text = ""
-            self.route_eta_label.text = ""
-            self.route_score_label.text = ""
+            self.route_info_card.opacity       = 0
+            self.route_info_card.height        = 0
+            self.route_distance_label.text     = ""
+            self.route_eta_label.text          = ""
+            self.route_score_label.text        = ""
         except Exception:
             pass
 
     def stop_route(self, *args):
-        """Stop navigation: clear drawn route and hide info box."""
         try:
-            if self.route_layer:
-                self.route_layer.clear_route()
+            self.route_layer.clear_route()
         except Exception:
             pass
-        try:
-            self._hide_route_info()
-        except Exception:
-            pass
-        # Return to map screen if not already
-        try:
-            self.manager.current = "map"
-        except Exception:
-            pass
+        self._hide_route_info()
 
     def _open_ar(self):
-        """Open the AR screen and pass the current route if available."""
         try:
             ar = self.manager.get_screen("ar")
-            # forward the route if the AR screen can accept it
-            if self.route_layer and hasattr(ar, "set_route"):
-                # route stored on layer
-                waypoints = getattr(self.route_layer, "_waypoints", None)
-                if waypoints:
-                    ar.set_route(waypoints)
+            waypoints = getattr(self.route_layer, "_waypoints", None)
+            if waypoints and hasattr(ar, "set_route"):
+                ar.set_route(waypoints)
             self.manager.current = "ar"
         except Exception as e:
             print(f"[MapScreen] _open_ar failed: {e}")

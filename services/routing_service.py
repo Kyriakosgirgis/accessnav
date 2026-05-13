@@ -1,115 +1,84 @@
-import math
+import os
 import threading
-import requests
-import networkx as nx
+
+import openrouteservice
 from kivy.clock import Clock
 
-
-# ------------------------------------------------------------------ #
-#  Accessibility edge weights                                          #
-# ------------------------------------------------------------------ #
-
-WEIGHT = {
-    "surface": {
-        "asphalt":        1.0,
-        "paved":          1.0,
-        "concrete":       1.0,
-        "paving_stones":  1.2,
-        "sett":           1.4,
-        "cobblestone":    2.0,
-        "gravel":         2.5,
-        "unpaved":        2.5,
-        "grass":          3.0,
-        "dirt":           3.0,
-        "sand":           4.0,
-    },
-    "highway": {
-        "footway":        1.0,
-        "pedestrian":     1.0,
-        "path":           1.2,
-        "living_street":  1.2,
-        "residential":    1.3,
-        "service":        1.4,
-        "tertiary":       1.5,
-        "secondary":      1.7,
-        "primary":        2.0,
-        "steps":          9.0,
-        "cycleway":       1.3,
-    },
-    "wheelchair": {
-        "yes":        0.8,
-        "designated": 0.8,
-        "limited":    1.5,
-        "no":         8.0,
-    },
-    "incline_threshold_pct": 6,
-    "incline_penalty":       2.0,
-}
-
-BLOCKED_BARRIERS = {"bollard", "gate", "fence", "wall", "block"}
-OVERPASS_URL     = "https://overpass-api.de/api/interpreter"
-USER_AGENT       = "AccessNav/1.0 (accessible routing)"
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
-# ------------------------------------------------------------------ #
-#  RoutingService                                                      #
-# ------------------------------------------------------------------ #
+API_KEY = os.getenv("ORS_API_KEY", "")
+
 
 class RoutingService:
     """
-    Builds an accessibility-weighted directed graph from OSM walkway
-    data and exposes A* pathfinding for wheelchair-friendly routing.
+    Wheelchair-accessible routing using OpenRouteService.
 
-    Usage:
-        svc = RoutingService()
-        svc.build_graph(
-            lat=34.7071, lon=33.0226, radius=800,
-            on_ready=lambda: svc.find_route(origin, dest, on_route=...),
-            on_error=lambda msg: print(msg),
-        )
+    Uses ORS's built-in wheelchair profile instead of custom
+    barrier avoidance logic.
+
+    This provides:
+    - better pedestrian geometry
+    - smoother routes
+    - accessibility-aware routing
+    - kerb/incline/surface handling
+    - more realistic navigation
     """
 
     def __init__(self):
-        self.graph    = None
-        self._cancel  = False
-        self._session = requests.Session()
 
-    # ------------------------------------------------------------------ #
-    #  Public API                                                          #
-    # ------------------------------------------------------------------ #
+        if not API_KEY:
+            print(
+                "[RoutingService] WARNING — "
+                "ORS_API_KEY not found in .env"
+            )
 
-    def build_graph(self, lat, lon, radius=800,
-                    on_ready=None, on_error=None):
-        """
-        Fetch OSM walkway data around (lat, lon) within radius metres
-        and build the routing graph on a background thread.
+        self.client = openrouteservice.Client(
+            key=API_KEY
+        )
 
-        on_ready()        — called on the main thread when graph is built
-        on_error(message) — called on the main thread if fetch fails
-        """
         self._cancel = False
-        threading.Thread(
-            target=self._fetch_and_build,
-            args=(lat, lon, radius, on_ready, on_error),
-            daemon=True,
-        ).start()
 
-    def find_route(self, origin, destination,
-                   on_route=None, on_error=None):
+    # ------------------------------------------------------------------ #
+    #  Public API                                                        #
+    # ------------------------------------------------------------------ #
+
+    def find_route(
+        self,
+        origin,
+        destination,
+        on_route=None,
+        on_error=None,
+        avoid_polygons=None,
+        avoid_radius_m=3,
+    ):
         """
-        Find the most accessible route from origin to destination.
+        origin/destination: (lat, lon)
 
-        origin/destination : (lat, lon) tuples
-        on_route(result)   : called with a result dict on the main thread
-        on_error(message)  : called if no route found
+        avoid_polygons: optional list of (lat, lon) tuples or dicts {"lat":..,"lon":..}
+                        which will be converted to small buffer polygons and
+                        passed to ORS as a MultiPolygon under the `options`
+                        -> "avoid_polygons" key.
+
+        result: { waypoints, distance_m, eta_minutes, instructions, accessibility_score }
         """
-        if self.graph is None:
-            self._deliver_error(on_error, "Graph not built yet.")
-            return
+
+        self._cancel = False
 
         threading.Thread(
-            target=self._run_astar,
-            args=(origin, destination, on_route, on_error),
+            target=self._route_thread,
+            args=(
+                origin,
+                destination,
+                on_route,
+                on_error,
+                avoid_polygons,
+                avoid_radius_m,
+            ),
             daemon=True,
         ).start()
 
@@ -117,396 +86,236 @@ class RoutingService:
         self._cancel = True
 
     # ------------------------------------------------------------------ #
-    #  Graph building                                                      #
+    #  Background Routing                                                #
     # ------------------------------------------------------------------ #
 
-    def _fetch_and_build(self, lat, lon, radius, on_ready, on_error):
-        try:
-            print(f"[RoutingService] Fetching OSM data — "
-                  f"centre: {lat},{lon} radius: {radius}m")
+    def _route_thread(
+        self,
+        origin,
+        destination,
+        on_route,
+        on_error,
+        avoid_polygons=None,
+        avoid_radius_m=3,
+    ):
 
-            elements = self._fetch_osm(lat, lon, radius)
+        try:
+
+            print(
+                f"[RoutingService] Requesting wheelchair route {origin} → {destination}"
+            )
+
+            # ORS requires [lon, lat]
+            coords = [
+                [origin[1], origin[0]],
+                [destination[1], destination[0]],
+            ]
+
+            # Build avoid_polygons option if requested
+            options = None
+            polys = []
+            if avoid_polygons:
+                for pt in avoid_polygons:
+                    if isinstance(pt, dict):
+                        lat = pt.get("lat")
+                        lon = pt.get("lon")
+                    else:
+                        lat, lon = pt
+                    if lat is None or lon is None:
+                        continue
+                    ring = self._buffer_point_ring(lat, lon, avoid_radius_m)
+                    ring_lonlat = [[p[1], p[0]] for p in ring]
+                    polys.append([ring_lonlat])
+                if polys:
+                    options = {"avoid_polygons": {"type": "MultiPolygon", "coordinates": polys}}
+
+            if options:
+                print(f"[RoutingService] Sending avoid_polygons with {len(polys)} polygon(s)")
+                route = self.client.directions(
+                    coordinates=coords,
+                    profile="wheelchair",
+                    format="geojson",
+                    instructions=True,
+                    instructions_format="text",
+                    language="en",
+                    geometry_simplify=False,
+                    validate=False,
+                    options=options,
+                )
+            else:
+                print("[RoutingService] No avoid_polygons — standard routing")
+                route = self.client.directions(
+                    coordinates=coords,
+                    profile="wheelchair",
+                    format="geojson",
+                    instructions=True,
+                    instructions_format="text",
+                    language="en",
+                    geometry_simplify=False,
+                    validate=False,
+                )
 
             if self._cancel:
                 return
 
-            print(f"[RoutingService] Received {len(elements)} elements")
+            # ---------------------------------------------------------- #
+            # Parse response                                             #
+            # ---------------------------------------------------------- #
 
-            self.graph = self._build_graph(elements)
+            feature = route["features"][0]
 
-            print(f"[RoutingService] Graph ready — "
-                  f"{self.graph.number_of_nodes()} nodes, "
-                  f"{self.graph.number_of_edges()} edges")
+            geometry = feature["geometry"]["coordinates"]
 
-            if on_ready and not self._cancel:
-                Clock.schedule_once(lambda dt: on_ready(), 0)
+            props = feature["properties"]
 
-        except requests.exceptions.ConnectionError:
-            self._deliver_error(on_error, "No internet connection.")
-        except requests.exceptions.Timeout:
-            self._deliver_error(on_error, "OSM request timed out.")
-        except Exception as e:
-            self._deliver_error(on_error, f"Graph build error: {e}")
+            summary = props["summary"]
 
-    def _fetch_osm(self, lat, lon, radius):
-        """Fetch all walkable ways and their nodes from Overpass."""
-        query = f"""
-[out:json][timeout:30];
-(
-  way["highway"~"^(footway|pedestrian|path|steps|living_street|residential|service|tertiary|secondary|primary|cycleway)$"]
-     (around:{radius},{lat},{lon});
-  way["foot"!="no"]
-     (around:{radius},{lat},{lon});
-);
-out body;
->;
-out skel qt;
-"""
-        response = self._session.post(
-            OVERPASS_URL,
-            data={"data": query},
-            headers={"User-Agent": USER_AGENT},
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json().get("elements", [])
+            segments = props.get("segments", [])
 
-    def _build_graph(self, elements):
-        """
-        Convert raw OSM elements into a weighted directed graph.
+            # Flatten geometry
+            def flatten(coords):
+                for item in coords:
+                    if not item:
+                        continue
+                    if isinstance(item[0], (int, float)):
+                        yield item
+                    else:
+                        for sub in item:
+                            if isinstance(sub, list) and len(sub) >= 2:
+                                yield sub
 
-        Nodes  : OSM node IDs stored with lat/lon attributes
-        Edges  : consecutive node pairs in each way
-        Weight : accessibility cost (lower = more accessible)
-        """
-        G     = nx.DiGraph()
-        nodes = {}
-        ways  = []
+            raw_coords = list(flatten(geometry))
 
-        # ── Pass 1 — collect nodes ─────────────────────────── #
-        for el in elements:
-            if el["type"] == "node":
-                # Store node coords and tags so we can detect barrier nodes
-                nodes[el["id"]] = {
-                    "lat": el["lat"],
-                    "lon": el["lon"],
-                    "tags": el.get("tags", {}),
-                }
-
-        # ── Pass 2 — collect ways ──────────────────────────── #
-        for el in elements:
-            if el["type"] != "way":
-                continue
-            tags     = el.get("tags", {})
-            node_ids = el.get("nodes", [])
-            if len(node_ids) < 2:
-                continue
-            ways.append({"tags": tags, "nodes": node_ids})
-
-        # ── Detect blocked nodes (barriers) ────────────────── #
-        blocked_nodes = set()
-        for nid, attrs in nodes.items():
-            tags = attrs.get("tags", {})
-            if tags.get("barrier") in BLOCKED_BARRIERS:
-                blocked_nodes.add(nid)
-
-        # ── Pass 3 — add graph nodes (skip blocked nodes) ─── #
-        for nid, attrs in nodes.items():
-            if nid in blocked_nodes:
-                # Do not add barrier nodes to the routing graph
-                continue
-            # keep tags on graph nodes for later inspection
-            G.add_node(nid, lat=attrs["lat"], lon=attrs["lon"], tags=attrs.get("tags", {}))
-
-        # ── Pass 4 — add edges ─────────────────────────────── #
-        skipped_ways = 0
-        skipped_steps = 0
-        skipped_wheelchair_no = 0
-
-        for way in ways:
-            tags = way["tags"]
-            node_ids = way["nodes"]
-
-            # Skip ways that are explicitly blocked (barrier on way) or access=no
-            if tags.get("barrier") in BLOCKED_BARRIERS:
-                skipped_ways += 1
-                continue
-            if tags.get("access") == "no":
-                skipped_ways += 1
-                continue
-
-            # Strict exclusions: avoid steps and ways explicitly unsuitable for wheelchairs
-            if tags.get("highway") == "steps":
-                skipped_steps += 1
-                continue
-            if tags.get("wheelchair") == "no":
-                skipped_wheelchair_no += 1
-                continue
-
-            weight = self._edge_weight(tags)
-
-            for i in range(len(node_ids) - 1):
-                u = node_ids[i]
-                v = node_ids[i + 1]
-
-                # Skip if node ids missing or correspond to blocked nodes
-                if u not in nodes or v not in nodes:
+            # Convert to (lat, lon)
+            waypoints = []
+            prev = None
+            for coord in raw_coords:
+                try:
+                    lon, lat = coord[0], coord[1]
+                except Exception:
                     continue
-                if u in blocked_nodes or v in blocked_nodes:
-                    continue
+                pt = (lat, lon)
+                if prev:
+                    if abs(prev[0] - pt[0]) < 1e-06 and abs(prev[1] - pt[1]) < 1e-06:
+                        continue
+                waypoints.append(pt)
+                prev = pt
 
-                dist = haversine(
-                    nodes[u]["lat"], nodes[u]["lon"],
-                    nodes[v]["lat"], nodes[v]["lon"],
-                )
+            # Instructions
+            instructions = []
+            for seg in segments:
+                for step in seg.get("steps", []):
+                    instructions.append({
+                        "instruction": step.get("instruction", ""),
+                        "distance": step.get("distance", 0),
+                        "duration": step.get("duration", 0),
+                        "type": step.get("type", 0),
+                    })
 
-                cost = dist * weight
-                oneway = tags.get("oneway") == "yes"
+            # Accessibility score
+            score = 0.85
+            if summary["distance"] < 300:
+                score += 0.03
+            if len(instructions) < 10:
+                score += 0.02
+            score = min(score, 1.0)
 
-                # Only add edges between nodes that were added to G
-                if u in G.nodes and v in G.nodes:
-                    G.add_edge(u, v, weight=cost, distance=dist, accessibility=weight)
-                if (not oneway) and (v in G.nodes and u in G.nodes):
-                    G.add_edge(v, u, weight=cost, distance=dist, accessibility=weight)
+            result = {
+                "waypoints": waypoints,
+                "distance_m": summary["distance"],
+                "eta_minutes": summary["duration"] / 60,
+                "instructions": instructions,
+                "accessibility_score": round(score, 2),
+            }
 
-        print(f"[RoutingService] Skipped ways: {skipped_ways}, steps: {skipped_steps}, wheelchair=no: {skipped_wheelchair_no}")
-
-        # ── Pass 5 — keep only the largest connected component #
-        # Removes isolated path fragments that cause "no path"  #
-        # errors for valid origin/destination pairs.             #
-        if G.number_of_nodes() == 0:
-            return G
-
-        largest     = max(nx.weakly_connected_components(G), key=len)
-        pruned      = G.subgraph(largest).copy()
-        removed     = G.number_of_nodes() - pruned.number_of_nodes()
-
-        print(f"[RoutingService] Largest component: "
-              f"{pruned.number_of_nodes()} nodes, "
-              f"{pruned.number_of_edges()} edges "
-              f"(removed {removed} isolated nodes)")
-
-        return pruned
-
-    def _edge_weight(self, tags):
-        """
-        Compute an accessibility multiplier for an OSM way.
-        1.0 = perfectly accessible, higher = less accessible.
-        """
-        w = 1.0
-
-        highway = tags.get("highway", "footway")
-        w *= WEIGHT["highway"].get(highway, 1.5)
-
-        # Steps are so heavily penalised no further factors apply
-        if highway == "steps":
-            return w
-
-        # Surface quality
-        surface = tags.get("surface", "")
-        w *= WEIGHT["surface"].get(surface, 1.0)
-
-        # Explicit wheelchair tag
-        wheelchair = tags.get("wheelchair", "")
-        if wheelchair in WEIGHT["wheelchair"]:
-            w *= WEIGHT["wheelchair"][wheelchair]
-
-        # Incline penalty
-        incline_raw = tags.get("incline", "").replace("%", "").strip()
-        try:
-            if abs(float(incline_raw)) > WEIGHT["incline_threshold_pct"]:
-                w *= WEIGHT["incline_penalty"]
-        except ValueError:
-            pass
-
-        # Barrier penalty
-        if tags.get("barrier", "") in BLOCKED_BARRIERS:
-            w *= 10.0
-
-        # Kerb / tactile paving bonus
-        if tags.get("kerb") in ("lowered", "flush"):
-            w *= 0.9
-        if tags.get("tactile_paving") == "yes":
-            w *= 0.95
-
-        # Narrow path penalty (wheelchair needs >= 0.9m)
-        width_raw = tags.get("width", "").replace("m", "").strip()
-        try:
-            if float(width_raw) < 0.9:
-                w *= 5.0
-        except ValueError:
-            pass
-
-        return max(w, 0.5)
-
-    # ------------------------------------------------------------------ #
-    #  A* pathfinding                                                      #
-    # ------------------------------------------------------------------ #
-
-    def _run_astar(self, origin, destination, on_route, on_error):
-        try:
-            origin_node = self._nearest_node(origin[0], origin[1])
-            dest_node   = self._nearest_node(destination[0], destination[1])
-
-            if origin_node is None or dest_node is None:
-                self._deliver_error(
-                    on_error, "Could not find a nearby walkable path."
-                )
-                return
-
-            print(f"[RoutingService] A* from node {origin_node} "
-                  f"to node {dest_node}")
-
-            path = nx.astar_path(
-                self.graph,
-                source=origin_node,
-                target=dest_node,
-                heuristic=self._heuristic,
-                weight="weight",
+            print(
+                f"[RoutingService] Route found — {len(waypoints)} waypoints, "
+                f"{summary['distance']:.0f}m, {summary['duration'] / 60:.1f} min"
             )
-
-            result = self._build_result(path, origin, destination)
-
-            print(f"[RoutingService] Route found — "
-                  f"{len(result['waypoints'])} waypoints, "
-                  f"{result['distance_m']:.0f}m, "
-                  f"score: {result['accessibility_score']}")
 
             if on_route and not self._cancel:
                 Clock.schedule_once(lambda dt: on_route(result), 0)
 
-        except nx.NetworkXNoPath:
+        except openrouteservice.exceptions.ApiError as e:
+
             self._deliver_error(
                 on_error,
-                "No accessible route found between these points. "
-                "Try a closer destination."
+                f"Routing API error: {e}"
             )
-        except nx.NodeNotFound:
-            self._deliver_error(on_error, "Route nodes not found in graph.")
+
+        except openrouteservice.exceptions.ValidationError as e:
+
+            self._deliver_error(
+                on_error,
+                f"Invalid coordinates: {e}"
+            )
+
         except Exception as e:
-            self._deliver_error(on_error, f"Routing error: {e}")
 
-    def _nearest_node(self, lat, lon):
-        """
-        Return the graph node ID closest to (lat, lon).
-        Only searches within the largest connected component
-        since the graph has already been pruned.
-        """
-        best_id   = None
-        best_dist = float("inf")
+            msg = str(e)
 
-        for nid, data in self.graph.nodes(data=True):
-            d = haversine(lat, lon, data["lat"], data["lon"])
-            if d < best_dist:
-                best_dist = d
-                best_id   = nid
+            if "quota" in msg.lower() or "429" in msg:
 
-        if best_dist > 150:
-            print(f"[RoutingService] Warning — nearest node is "
-                  f"{best_dist:.0f}m away")
+                self._deliver_error(
+                    on_error,
+                    "Daily routing quota exceeded."
+                )
 
-        return best_id
+            elif "Unable to find" in msg or "2010" in msg:
 
-    def _heuristic(self, u, v):
-        """
-        A* heuristic — straight-line haversine distance.
-        Admissible because real cost >= straight-line distance.
-        """
-        u_data = self.graph.nodes[u]
-        v_data = self.graph.nodes[v]
-        return haversine(
-            u_data["lat"], u_data["lon"],
-            v_data["lat"], v_data["lon"],
-        )
+                self._deliver_error(
+                    on_error,
+                    "No wheelchair-accessible route found."
+                )
 
-    def _build_result(self, node_path, origin, destination):
-        """
-        Convert a node ID path into a result dict:
-        {
-            waypoints:           [(lat, lon), ...]
-            distance_m:          float
-            eta_minutes:         float
-            accessibility_score: float  (0-1, higher = more accessible)
-            edges:               [edge_data_dict, ...]
-        }
-        """
-        # Build waypoints from the graph node coordinates so the route
-        # follows actual graph geometry. Node_path is a list of node IDs
-        # starting with the origin node and ending with the destination node.
-        node_coords = []
-        for nid in node_path:
-            nd = self.graph.nodes.get(nid)
-            if nd:
-                node_coords.append((nd["lat"], nd["lon"]))
-
-        # If the user's origin/destination GPS points are significantly
-        # distant from the nearest graph node, include them as endpoints
-        # so the drawn route connects to the exact locations.
-        waypoints = list(node_coords)
-        try:
-            if node_coords:
-                first = node_coords[0]
-                last = node_coords[-1]
-                if haversine(origin[0], origin[1], first[0], first[1]) > 20.0:
-                    waypoints.insert(0, origin)
-                if haversine(destination[0], destination[1], last[0], last[1]) > 20.0:
-                    waypoints.append(destination)
             else:
-                # Fallback — no nodes (shouldn't happen) — use origin/destination
-                waypoints = [origin, destination]
-        except Exception:
-            waypoints = [origin] + waypoints + [destination]
 
-        total_dist = 0.0
-        total_cost = 0.0
-        edges = []
+                self._deliver_error(
+                    on_error,
+                    f"Routing error: {msg}"
+                )
 
-        for i in range(len(node_path) - 1):
-            u = node_path[i]
-            v = node_path[i + 1]
-            data = self.graph[u][v]
-            total_dist += data.get("distance", 0)
-            total_cost += data.get("weight", 0)
-            edges.append(data)
+    # ------------------------------------------------------------------ #
+    #  Error Handling                                                    #
+    # ------------------------------------------------------------------ #
 
-        # Score: ratio of straight-line distance to weighted cost (clamped)
-        if total_cost > 0:
-            score = min(total_dist / total_cost, 1.0)
-        else:
-            score = 1.0
+    def _deliver_error(
+        self,
+        on_error,
+        message,
+    ):
 
-        # Wheelchair walking speed ~60m/min
-        eta = total_dist / 60.0
+        print(f"[RoutingService] {message}")
 
-        return {
-            "waypoints":           waypoints,
-            "distance_m":          total_dist,
-            "eta_minutes":         eta,
-            "accessibility_score": round(score, 2),
-            "edges":               edges,
-            "node_path":           node_path,
-        }
+        if on_error and not self._cancel:
+
+            Clock.schedule_once(
+                lambda dt: on_error(message),
+                0,
+            )
 
     # ------------------------------------------------------------------ #
     #  Helpers                                                             #
     # ------------------------------------------------------------------ #
 
-    def _deliver_error(self, on_error, message):
-        print(f"[RoutingService] {message}")
-        if on_error and not self._cancel:
-            Clock.schedule_once(lambda dt: on_error(message), 0)
+    def _buffer_point_ring(self, lat, lon, radius_m, steps=12):
+        """Return a small circular polygon ring approximating a buffer
+        around the given (lat, lon). Uses a simple degrees-per-metre
+        approximation adequate for small radii (few metres).
+        Returns list of (lat, lon) with first == last to close the ring.
+        """
+        import math
 
+        # degrees per metre at the given latitude
+        deg_per_m_lat = 1.0 / 111320.0
+        deg_per_m_lon = 1.0 / (111320.0 * math.cos(math.radians(lat)))
 
-# ------------------------------------------------------------------ #
-#  Haversine distance in metres                                        #
-# ------------------------------------------------------------------ #
-
-def haversine(lat1, lon1, lat2, lon2):
-    R    = 6_371_000
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlam = math.radians(lon2 - lon1)
-    a    = (math.sin(dphi / 2) ** 2
-            + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        ring = []
+        for i in range(steps):
+            theta = 2 * math.pi * i / steps
+            dlat = math.sin(theta) * radius_m * deg_per_m_lat
+            dlon = math.cos(theta) * radius_m * deg_per_m_lon
+            ring.append((lat + dlat, lon + dlon))
+        if ring and ring[0] != ring[-1]:
+            ring.append(ring[0])
+        return ring
