@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+        dir: "alternate",
+        dur: 1000,
+        loop: true,
+        to: `${x} 1.5 ${z}`
+    });
+
+    routeRoot.appendChild(marker);
+
+    const label = document.createElement("a-text");
+
+    label.setAttribute("value", `Waypoint ${index + 1}`);
+    label.setAttribute("position", `${x} 2.2 ${z}`);
+    label.setAttribute("align", "center");
+    label.setAttribute("color", "white");
+    label.setAttribute("scale", "2 2 2");
+
+    routeRoot.appendChild(label);
+}
+
+function addBarrier(x, z) {
+
+    const barrier = document.createElement("a-cylinder");
+
+    barrier.setAttribute("position", `${x} 0.8 ${z}`);
+    barrier.setAttribute("radius", "0.4");
+    barrier.setAttribute("height", "1.6");
+    barrier.setAttribute("color", "#ff4444");
+
+    routeRoot.appendChild(barrier);
+}
+
+function showRoute(waypoints) {
+
+    clearRoute();
+
+    if (!waypoints || waypoints.length === 0) {
+        return;
+    }
+
+    // Desktop simulation layout
+    for (let i = 0; i < waypoints.length; i++) {
+
+        const x = (i % 2 === 0) ? -2 : 2;
+        const z = -5 - (i * 4);
+
+        addWaypoint(x, z, i);
+    }
+
+    // Example barriers
+    addBarrier(0, -12);
+    addBarrier(1, -24);
+
+    // Destination beacon
+    const beacon = document.createElement("a-sphere");
+
+    beacon.setAttribute("position", "0 4 -40");
+    beacon.setAttribute("radius", "1");
+    beacon.setAttribute("color", "#00ffff");
+
+    beacon.setAttribute("animation", {
+        property: "scale",
+        dir: "alternate",
+        dur: 800,
+        loop: true,
+        to: "1.5 1.5 1.5"
+    });
+
+    routeRoot.appendChild(beacon);
+}
+
+window.showRoute = showRoute;
+
+</script>
+
+</body>
+</html>

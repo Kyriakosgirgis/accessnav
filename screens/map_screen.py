@@ -120,6 +120,7 @@ class MapScreen(MDScreen):
         self.destination    = None
         self.poi_markers    = []
         self.poi_visible    = True
+        self._last_poi_fetch = None
         self.build_ui()
 
     # ------------------------------------------------------------------ #
@@ -764,8 +765,9 @@ class MapScreen(MDScreen):
     # ------------------------------------------------------------------ #
 
     def _fetch_poi_markers(self, lat, lon):
-        if hasattr(self, "_last_poi_fetch"):
-            last_lat, last_lon = self._last_poi_fetch
+        last = getattr(self, "_last_poi_fetch", None)
+        if last and isinstance(last, (list, tuple)) and len(last) == 2:
+            last_lat, last_lon = last
             if abs(lat - last_lat) < 0.001 and abs(lon - last_lon) < 0.001:
                 return
         self._last_poi_fetch = (lat, lon)
@@ -824,6 +826,13 @@ class MapScreen(MDScreen):
             except Exception:
                 pass
         self.poi_markers.clear()
+        # Reset the last fetch coord so markers will be re-fetched when the
+        # screen is re-entered (otherwise _fetch_poi_markers may skip fetching
+        # because the last fetch coords match the current location).
+        try:
+            self._last_poi_fetch = None
+        except Exception:
+            pass
 
     def _toggle_poi_markers(self, *args):
         self.poi_visible = not self.poi_visible

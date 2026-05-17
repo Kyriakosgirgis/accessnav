@@ -3,3 +3,4 @@ kivymd~=2.0.1.dev0
 Kivy~=2.3.1
 bcrypt~=5.0.0
 requests~=2.33.1
+pywebview
