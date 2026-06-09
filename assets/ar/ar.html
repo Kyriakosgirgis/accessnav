@@ -1,77 +1,291 @@
 <!DOCTYPE html>
-        dir: "alternate",
-        dur: 1000,
-        loop: true,
-        to: `${x} 1.5 ${z}`
-    });
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>AccessNav AR</title>
 
-    routeRoot.appendChild(marker);
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            background: black;
+            font-family: Arial, sans-serif;
+        }
 
-    const label = document.createElement("a-text");
+        #camera-bg {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            filter:
+                brightness(0.72)
+                contrast(1.05)
+                saturate(0.9);
+            z-index: -2;
+        }
 
-    label.setAttribute("value", `Waypoint ${index + 1}`);
-    label.setAttribute("position", `${x} 2.2 ${z}`);
-    label.setAttribute("align", "center");
-    label.setAttribute("color", "white");
-    label.setAttribute("scale", "2 2 2");
+        #vignette {
+            position: fixed;
+            inset: 0;
+            background:
+                radial-gradient(circle,
+                    rgba(0,0,0,0) 45%,
+                    rgba(0,0,0,0.45) 100%);
+            z-index: -1;
+            pointer-events: none;
+        }
 
-    routeRoot.appendChild(label);
-}
+        #hud-top {
+            position: absolute;
+            top: 55px;
+            width: 100%;
+            text-align: center;
+            color: #4CFF73;
+            z-index: 20;
+            text-shadow: 0 0 12px rgba(76,255,115,0.45);
+        }
 
-function addBarrier(x, z) {
+        #instruction {
+            font-size: 58px;
+            font-weight: bold;
+            letter-spacing: 2px;
+            animation: pulse 1.8s infinite;
+        }
 
-    const barrier = document.createElement("a-cylinder");
+        #distance {
+            margin-top: 16px;
+            font-size: 42px;
+            color: white;
+        }
 
-    barrier.setAttribute("position", `${x} 0.8 ${z}`);
-    barrier.setAttribute("radius", "0.4");
-    barrier.setAttribute("height", "1.6");
-    barrier.setAttribute("color", "#ff4444");
+        #destination {
+            position: absolute;
+            top: 18%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: #ff4b4b;
+            box-shadow:
+                0 0 20px rgba(255,75,75,0.7),
+                0 0 45px rgba(255,75,75,0.4);
+            z-index: 12;
+        }
 
-    routeRoot.appendChild(barrier);
-}
+        #road {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+            pointer-events: none;
+        }
 
-function showRoute(waypoints) {
+        .lane {
+            position: absolute;
+            bottom: -5%;
+            width: 7px;
+            height: 82%;
+            background: rgba(0,0,0,0.45);
+            border-radius: 6px;
+            transform-origin: bottom center;
+        }
 
-    clearRoute();
+        #lane-left {
+            left: 42%;
+            transform: rotate(28deg);
+        }
 
-    if (!waypoints || waypoints.length === 0) {
-        return;
-    }
+        #lane-right {
+            right: 42%;
+            transform: rotate(-28deg);
+        }
 
-    // Desktop simulation layout
-    for (let i = 0; i < waypoints.length; i++) {
+        #arrow-container {
+            position: absolute;
+            inset: 0;
+            z-index: 10;
+            pointer-events: none;
+        }
 
-        const x = (i % 2 === 0) ? -2 : 2;
-        const z = -5 - (i * 4);
+        .arrow {
+            position: absolute;
+            width: 80px;
+            height: 80px;
+            border-right: 10px solid rgba(76,255,115,0.95);
+            border-bottom: 10px solid rgba(76,255,115,0.95);
+            transform: rotate(45deg);
+            left: 50%;
+            margin-left: -40px;
 
-        addWaypoint(x, z, i);
-    }
+            box-shadow:
+                0 0 12px rgba(76,255,115,0.55);
 
-    // Example barriers
-    addBarrier(0, -12);
-    addBarrier(1, -24);
+            animation:
+                flow 3.2s linear infinite,
+                glow 1.5s ease-in-out infinite alternate;
+        }
 
-    // Destination beacon
-    const beacon = document.createElement("a-sphere");
+        .arrow:nth-child(1) {
+            animation-delay: 0s;
+        }
 
-    beacon.setAttribute("position", "0 4 -40");
-    beacon.setAttribute("radius", "1");
-    beacon.setAttribute("color", "#00ffff");
+        .arrow:nth-child(2) {
+            animation-delay: 0.6s;
+        }
 
-    beacon.setAttribute("animation", {
-        property: "scale",
-        dir: "alternate",
-        dur: 800,
-        loop: true,
-        to: "1.5 1.5 1.5"
-    });
+        .arrow:nth-child(3) {
+            animation-delay: 1.2s;
+        }
 
-    routeRoot.appendChild(beacon);
-}
+        .arrow:nth-child(4) {
+            animation-delay: 1.8s;
+        }
 
-window.showRoute = showRoute;
+        .arrow:nth-child(5) {
+            animation-delay: 2.4s;
+        }
 
-</script>
+        #bottom-bar {
+            position: absolute;
+            bottom: 0;
+            width: 100%;
+            height: 130px;
+
+            background: rgba(0,0,0,0.45);
+            backdrop-filter: blur(8px);
+
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+
+            color: white;
+            font-size: 26px;
+
+            z-index: 30;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-label {
+            opacity: 0.75;
+            font-size: 20px;
+            margin-bottom: 6px;
+        }
+
+        @keyframes flow {
+            0% {
+                top: 78%;
+                opacity: 0;
+                transform:
+                    translateX(0px)
+                    scale(0.35)
+                    rotate(45deg);
+            }
+
+            10% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 1;
+                transform:
+                    translateX(0px)
+                    scale(0.7)
+                    rotate(45deg);
+            }
+
+            100% {
+                top: 32%;
+                opacity: 0;
+                transform:
+                    translateX(0px)
+                    scale(1.2)
+                    rotate(45deg);
+            }
+        }
+
+        @keyframes glow {
+            from {
+                box-shadow:
+                    0 0 8px rgba(76,255,115,0.35);
+            }
+
+            to {
+                box-shadow:
+                    0 0 22px rgba(76,255,115,0.75);
+            }
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 0.85;
+            }
+
+            50% {
+                opacity: 1;
+            }
+
+            100% {
+                opacity: 0.85;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Fake Camera Background -->
+    <img id="camera-bg" src="assets/fake_camera.jpg">
+
+    <div id="vignette"></div>
+
+    <!-- Destination -->
+    <div id="destination"></div>
+
+    <!-- Top HUD -->
+    <div id="hud-top">
+        <div id="instruction">CONTINUE FORWARD</div>
+        <div id="distance">125m</div>
+    </div>
+
+    <!-- Road Perspective -->
+    <div id="road">
+        <div class="lane" id="lane-left"></div>
+        <div class="lane" id="lane-right"></div>
+    </div>
+
+    <!-- Animated Ground Arrows -->
+    <div id="arrow-container">
+        <div class="arrow"></div>
+        <div class="arrow"></div>
+        <div class="arrow"></div>
+        <div class="arrow"></div>
+        <div class="arrow"></div>
+    </div>
+
+    <!-- Bottom HUD -->
+    <div id="bottom-bar">
+        <div class="stat">
+            <div class="stat-label">ETA</div>
+            <div>2 min</div>
+        </div>
+
+        <div class="stat">
+            <div class="stat-label">Speed</div>
+            <div>1.4 m/s</div>
+        </div>
+
+        <div class="stat">
+            <div class="stat-label">Mode</div>
+            <div>ACCESSNAV AR</div>
+        </div>
+    </div>
 
 </body>
 </html>

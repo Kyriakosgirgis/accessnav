@@ -6,8 +6,9 @@ from kivy.core.window import Window
 from screens.login_screen import LoginScreen
 from screens.register_screen import RegisterScreen
 from screens.map_screen import MapScreen
+from screens.ar_screen import ARScreen
 from screens.report_screen import ReportScreen
-
+from screens.settings_screen import SettingsScreen
 from services.session_service import SessionService
 
 Window.size = (390, 844)
@@ -26,179 +27,150 @@ MDBoxLayout:
 
         MDNavigationItem:
             name: 'map'
-
             MDNavigationItemIcon:
                 icon: 'map-marker-radius'
-
             MDNavigationItemLabel:
                 text: 'Map'
 
         MDNavigationItem:
             name: 'ar'
-
             MDNavigationItemIcon:
-                icon: 'camera'
-
+                icon: 'navigation'
             MDNavigationItemLabel:
-                text: 'AR'
+                text: 'Navigate'
 
         MDNavigationItem:
             name: 'report'
-
             MDNavigationItemIcon:
                 icon: 'flag-plus'
-
             MDNavigationItemLabel:
                 text: 'Report'
+
+        MDNavigationItem:
+            name: 'settings'
+            MDNavigationItemIcon:
+                icon: 'cog-outline'
+            MDNavigationItemLabel:
+                text: 'Settings'
 """
 
 
 class AccessNavApp(MDApp):
-
     current_user = None
 
     def build(self):
-
         self.theme_cls.primary_palette = "Green"
-        self.theme_cls.theme_style = "Light"
-
-        self.title = "AccessNav"
-
-        self.session = SessionService()
+        self.theme_cls.theme_style     = "Light"
+        self.title                     = "AccessNav"
+        self.session                   = SessionService()
 
         root = Builder.load_string(KV)
 
         sm = root.ids.screen_manager
         sm.transition = NoTransition()
 
-        # -------------------------------------------------- #
-        # Screens
-        # -------------------------------------------------- #
-
         sm.add_widget(LoginScreen(name="login"))
         sm.add_widget(RegisterScreen(name="register"))
         sm.add_widget(MapScreen(name="map"))
-
-        # Lazy-load AR screen
-        from kivymd.uix.screen import MDScreen
-
-        class DeferredARScreen(MDScreen):
-
-            loaded = False
-
-            def on_enter(self_inner, *args):
-
-                if self_inner.loaded:
-                    return
-
-                self_inner.loaded = True
-
-                try:
-                    print("[Main] Loading ARScreen...")
-
-                    from screens.ar_screen import ARScreen
-
-                    ar_screen = ARScreen(name="ar")
-
-                    sm.add_widget(ar_screen)
-
-                    sm.remove_widget(self_inner)
-
-                    Clock.schedule_once(
-                        lambda dt: setattr(sm, "current", "ar"),
-                        0
-                    )
-
-                    print("[Main] ARScreen loaded")
-
-                except Exception as e:
-                    print(f"[Main] Failed to load ARScreen: {e}")
-
-        from kivy.clock import Clock
-
-        sm.add_widget(DeferredARScreen(name="ar"))
-
+        sm.add_widget(ARScreen(name="ar"))
         sm.add_widget(ReportScreen(name="report"))
-
-        # -------------------------------------------------- #
-        # Session restore
-        # -------------------------------------------------- #
+        sm.add_widget(SettingsScreen(name="settings"))
 
         saved = self.session.load()
-
         if saved:
-
             self.current_user = saved
-
             sm.current = "map"
-
-            self._show_nav(True, root)
-
+            self._set_nav(root, visible=True)
         else:
-
             sm.current = "login"
-
-            self._show_nav(False, root)
+            self._set_nav(root, visible=False)
 
         return root
 
-    # ------------------------------------------------------ #
-    # Auth
-    # ------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    #  Session                                                             #
+    # ------------------------------------------------------------------ #
 
     def login(self, user):
-
         self.current_user = user.to_dict()
-
         self.session.save(user)
-
-        self._show_nav(True)
-
+        self._set_nav(self.root, visible=True)
         self.root.ids.screen_manager.current = "map"
 
     def logout(self):
-
         self.current_user = None
-
         self.session.clear()
-
-        self._show_nav(False)
-
+        self._set_nav(self.root, visible=False)
         self.root.ids.screen_manager.current = "login"
 
     def is_logged_in(self):
-
         return self.current_user is not None
 
-    # ------------------------------------------------------ #
-    # Navigation
-    # ------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    #  Navigation                                                          #
+    # ------------------------------------------------------------------ #
 
-    def switch_screen(self, nav_bar, item, item_icon, item_text):
+    def switch_screen(self, *args):
+        """Handle navigation bar callbacks with flexible signatures.
 
+        Prefer an argument object with a `name` attribute (the
+        navigation item). If only a string is provided (often the
+        display label like "Settings"), try to resolve it to a known
+        screen name in the ScreenManager in a case-insensitive way.
+        """
         if not self.is_logged_in():
             return
 
-        try:
-            self.root.ids.screen_manager.current = item.name
-        except Exception as e:
-            print(f"[Main] Navigation error: {e}")
+        sm = self.root.ids.screen_manager
 
-    # ------------------------------------------------------ #
-    # Bottom nav visibility
-    # ------------------------------------------------------ #
+        # Prefer an object with a `name` attribute.
+        item_name = None
+        for a in reversed(args):
+            if hasattr(a, "name"):
+                item_name = getattr(a, "name")
+                break
 
-    def _show_nav(self, visible, root=None):
+        # Fallback to a string argument (e.g. a label text) if no
+        # `name`-bearing object was found.
+        if item_name is None:
+            for a in reversed(args):
+                if isinstance(a, str):
+                    item_name = a
+                    break
 
-        nav = (root or self.root).ids.nav_bar
+        if not item_name:
+            return
 
-        nav.size_hint_y = None if visible else 0
+        # If the item_name doesn't exactly match any screen, try
+        # case-insensitive matching against available screen names.
+        available = [s.name for s in sm.screens]
+        if item_name in available:
+            target = item_name
+        else:
+            lowered = item_name.strip().lower()
+            target = None
+            for name in available:
+                if name.lower() == lowered or lowered == name.lower():
+                    target = name
+                    break
+                # also handle display labels like 'Settings' -> 'settings'
+                if lowered == name.lower():
+                    target = name
+                    break
 
-        nav.height = "80dp" if visible else 0
+        if target:
+            sm.current = target
 
-        nav.opacity = 1 if visible else 0
+    # ------------------------------------------------------------------ #
+    #  Nav bar visibility                                                  #
+    # ------------------------------------------------------------------ #
 
+    def _set_nav(self, root, visible):
+        nav          = root.ids.nav_bar
+        nav.opacity  = 1 if visible else 0
         nav.disabled = not visible
+        nav.size_hint_y = None if visible else 0
+        nav.height      = "80dp" if visible else "0dp"
 
 
 if __name__ == "__main__":

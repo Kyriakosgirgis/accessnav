@@ -1,4 +1,7 @@
 import os
+import threading
+import requests
+
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.behaviors import ButtonBehavior
@@ -33,7 +36,14 @@ from services.routing_service import RoutingService
 
 from components.route_layer import RouteLayer
 
-VIEWBOX = (32.95, 34.63, 33.15, 34.72)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+VIEWBOX  = (32.95, 34.63, 33.15, 34.72)
+API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 
 # ------------------------------------------------------------------ #
@@ -104,23 +114,26 @@ def _haversine(lat1, lon1, lat2, lon2):
 class MapScreen(MDScreen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.gps            = GPSService()
-        self.geocoder       = GeocodingService()
-        self.osm            = OSMService()
-        self.routing        = RoutingService()
-        self.route_layer    = RouteLayer()
-        self.map_view       = None
-        self.user_marker    = None
-        self.dest_marker    = None
-        self._map_ready     = False
-        self._first_fix     = False
-        self._search_event  = None
-        self._searching     = False
-        self._routing       = False
-        self.destination    = None
-        self.poi_markers    = []
-        self.poi_visible    = True
+        self.gps             = GPSService()
+        self.geocoder        = GeocodingService()
+        self.osm             = OSMService()
+        self.routing         = RoutingService()
+        self.route_layer     = RouteLayer()
+        self.map_view        = None
+        self.user_marker     = None
+        self.dest_marker     = None
+        self._map_ready      = False
+        self._first_fix      = False
+        self._search_event   = None
+        self._searching      = False
+        self._routing        = False
+        self.destination     = None
+        self.poi_markers     = []
+        self.poi_visible     = True
         self._last_poi_fetch = None
+        # Community reports
+        self._community_markers  = []
+        self._last_comm_fetch    = None
         self.build_ui()
 
     # ------------------------------------------------------------------ #
@@ -141,6 +154,7 @@ class MapScreen(MDScreen):
         self.osm.cancel()
         self.routing.cancel()
         self._clear_poi_markers()
+        self._clear_community_markers()
         try:
             self.route_layer.clear_route()
         except Exception:
@@ -161,7 +175,7 @@ class MapScreen(MDScreen):
         )
 
     # ------------------------------------------------------------------ #
-    #  Build UI — unchanged from your file                                #
+    #  Build UI                                                            #
     # ------------------------------------------------------------------ #
 
     def build_ui(self):
@@ -453,9 +467,6 @@ class MapScreen(MDScreen):
             orientation="vertical",
             size_hint=(None, None),
             size=(dp(260), dp(72)),
-            # Move the route info card lower on the screen to avoid
-            # overlapping the top UI elements. 'y' places the card a
-            # fraction above the bottom of the screen.
             pos_hint={"right": 0.98, "y": 0.22},
             md_bg_color=(1, 1, 1, 0.98),
             radius=[dp(12)],
@@ -761,7 +772,7 @@ class MapScreen(MDScreen):
             pass
 
     # ------------------------------------------------------------------ #
-    #  POI markers                                                         #
+    #  OSM POI markers                                                     #
     # ------------------------------------------------------------------ #
 
     def _fetch_poi_markers(self, lat, lon):
@@ -826,13 +837,7 @@ class MapScreen(MDScreen):
             except Exception:
                 pass
         self.poi_markers.clear()
-        # Reset the last fetch coord so markers will be re-fetched when the
-        # screen is re-entered (otherwise _fetch_poi_markers may skip fetching
-        # because the last fetch coords match the current location).
-        try:
-            self._last_poi_fetch = None
-        except Exception:
-            pass
+        self._last_poi_fetch = None
 
     def _toggle_poi_markers(self, *args):
         self.poi_visible = not self.poi_visible
@@ -842,6 +847,10 @@ class MapScreen(MDScreen):
                     self.map_view.add_marker(marker)
                 except Exception:
                     pass
+            # Also refresh community markers
+            lat, lon = self.gps.get_location()
+            self._last_comm_fetch = None
+            self._fetch_community_reports(lat, lon)
             self.poi_toggle.md_bg_color = (0.2, 0.8, 0.2, 1)
         else:
             for marker in self.poi_markers:
@@ -849,7 +858,115 @@ class MapScreen(MDScreen):
                     self.map_view.remove_marker(marker)
                 except Exception:
                     pass
+            self._clear_community_markers()
             self.poi_toggle.md_bg_color = (0.5, 0.5, 0.5, 1)
+
+    # ------------------------------------------------------------------ #
+    #  Community reports from FastAPI                                      #
+    # ------------------------------------------------------------------ #
+
+    def _fetch_community_reports(self, lat, lon):
+        """
+        Fetch user-submitted spots from the FastAPI /spots endpoint
+        and plot them on the map. Movement-throttled so it only
+        re-fetches when the user has moved more than ~110m.
+        """
+        if self._last_comm_fetch:
+            last_lat, last_lon = self._last_comm_fetch
+            if abs(lat - last_lat) < 0.001 and abs(lon - last_lon) < 0.001:
+                return
+
+        self._last_comm_fetch = (lat, lon)
+
+        threading.Thread(
+            target=self._do_fetch_community,
+            args=(lat, lon),
+            daemon=True,
+        ).start()
+
+    def _do_fetch_community(self, lat, lon):
+        """Background thread — calls FastAPI, delivers to main thread."""
+        try:
+            response = requests.get(
+                f"{API_BASE}/spots",
+                params={
+                    "lat":      lat,
+                    "lon":      lon,
+                    "radius_m": 800,
+                },
+                timeout=8,
+            )
+            if response.status_code == 200:
+                spots = response.json()
+                print(f"[MapScreen] Community: {len(spots)} spots from API")
+                Clock.schedule_once(
+                    lambda dt: self._plot_community_spots(spots), 0
+                )
+            else:
+                print(f"[MapScreen] Community fetch: HTTP {response.status_code}")
+
+        except requests.exceptions.ConnectionError:
+            print("[MapScreen] Community fetch: API not reachable — start with: uvicorn api.main:app --reload")
+        except requests.exceptions.Timeout:
+            print("[MapScreen] Community fetch: timed out")
+        except Exception as e:
+            print(f"[MapScreen] Community fetch error: {e}")
+
+    def _plot_community_spots(self, spots):
+        """
+        Plot community-submitted spots as POI markers.
+        Unverified spots (user reports) shown at 65% opacity to
+        visually distinguish them from OSM-verified data.
+        """
+        self._clear_community_markers()
+
+        for spot in spots:
+            try:
+                marker = POIMarker(
+                    lat=spot["lat"],
+                    lon=spot["lon"],
+                    feature_type=spot["spot_type"],
+                )
+                marker.feature_name = (
+                    spot.get("description") or
+                    spot["spot_type"].replace("_", " ").title()
+                )
+                marker.feature_data = spot
+
+                # Unverified reports shown semi-transparent
+                if not spot.get("verified", True):
+                    marker.opacity = 0.65
+
+                marker.bind(on_release=self._on_community_marker_tap)
+                self.map_view.add_marker(marker)
+                self._community_markers.append(marker)
+
+            except Exception as e:
+                print(f"[MapScreen] Community marker error: {e}")
+
+        if self._community_markers:
+            print(
+                f"[MapScreen] Plotted "
+                f"{len(self._community_markers)} community markers"
+            )
+
+    def _clear_community_markers(self):
+        for marker in self._community_markers:
+            try:
+                self.map_view.remove_marker(marker)
+            except Exception:
+                pass
+        self._community_markers.clear()
+
+    def _on_community_marker_tap(self, marker):
+        name     = getattr(marker, "feature_name", "Community report")
+        data     = getattr(marker, "feature_data", {})
+        verified = data.get("verified", False)
+        status   = "Verified ✓" if verified else "Community report"
+        MDSnackbar(
+            MDSnackbarText(text=f"{name}  ·  {status}"),
+            duration=2,
+        ).open()
 
     # ------------------------------------------------------------------ #
     #  GPS callbacks                                                       #
@@ -867,6 +984,7 @@ class MapScreen(MDScreen):
             )
             Clock.schedule_once(lambda dt: self._hide_status_bar(), 3)
             self._fetch_poi_markers(lat, lon)
+            self._fetch_community_reports(lat, lon)   # ← community layer
         self._move_user_marker(lat, lon)
         self.accuracy_label.text = f"±{accuracy:.0f}m"
 
@@ -942,7 +1060,6 @@ class MapScreen(MDScreen):
         origin = self.gps.get_location()
         dest   = (self.destination["lat"], self.destination["lon"])
 
-        # Disable Go button while routing
         self.go_btn.disabled = True
         for child in self.go_btn.children:
             if hasattr(child, "text"):
@@ -950,7 +1067,6 @@ class MapScreen(MDScreen):
 
         self._show_status("Finding route...", searching=True)
 
-        # Collect barrier POIs and pass them as avoid_polygons to ORS.
         barriers = []
         try:
             for marker in self.poi_markers:
@@ -977,7 +1093,6 @@ class MapScreen(MDScreen):
     # ------------------------------------------------------------------ #
 
     def _on_route(self, result):
-        """Called by RoutingService when ORS returns a route."""
         self._routing        = False
         self.go_btn.disabled = False
         for child in self.go_btn.children:
@@ -991,41 +1106,44 @@ class MapScreen(MDScreen):
             eta       = result.get("eta_minutes", 0.0)
 
             if not waypoints or len(waypoints) < 2:
-                self._on_route_error("Route returned no waypoints")
+                self._on_route_error("Route returned no valid waypoints")
                 return
 
-            # Draw route
+            print(f"[MapScreen] Route received: {len(waypoints)} points")
+
             try:
                 self.route_layer._map_view = self.map_view
                 self.route_layer.set_route(waypoints, score=score)
                 self.route_layer.invalidate()
+                print("[MapScreen] Route drawn")
             except Exception as e:
                 print(f"[MapScreen] Route draw error: {e}")
 
-            # Centre map on route midpoint
             try:
                 mid = waypoints[len(waypoints) // 2]
                 self.map_view.center_on(mid[0], mid[1])
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[MapScreen] Centre map failed: {e}")
 
-            # Show info card
-            self._show_route_info(result)
+            self._show_route_info({
+                "distance_m":          dist,
+                "eta_minutes":         eta,
+                "accessibility_score": score,
+            })
             self._hide_status_bar()
 
-            # Pass waypoints to AR screen
             try:
                 ar = self.manager.get_screen("ar")
                 if hasattr(ar, "set_route"):
                     ar.set_route(waypoints)
-            except Exception:
-                pass
+                    print(f"[MapScreen] Sent {len(waypoints)} points to AR")
+            except Exception as e:
+                print(f"[MapScreen] AR transfer failed: {e}")
 
         except Exception as e:
-            print(f"[MapScreen] _on_route error: {e}")
+            print(f"[MapScreen] _on_route fatal error: {e}")
 
     def _on_route_error(self, message):
-        """ORS failed — draw a straight-line fallback."""
         self._routing        = False
         self.go_btn.disabled = False
         for child in self.go_btn.children:
@@ -1062,11 +1180,14 @@ class MapScreen(MDScreen):
             print(f"[MapScreen] Fallback routing failed: {e}")
 
         self._hide_status_bar()
-
         MDSnackbar(
             MDSnackbarText(text=message),
             duration=4,
         ).open()
+
+    # ------------------------------------------------------------------ #
+    #  Route info card                                                     #
+    # ------------------------------------------------------------------ #
 
     def _show_route_info(self, result):
         try:
@@ -1079,7 +1200,7 @@ class MapScreen(MDScreen):
             self.route_info_card.opacity   = 1
             self.route_info_card.height    = dp(72)
         except Exception as e:
-            print(f"[MapScreen] _show_route_info error: {e}")
+            print(f"[MapScreen] Route info error: {e}")
 
     def _hide_route_info(self):
         try:
@@ -1098,12 +1219,19 @@ class MapScreen(MDScreen):
             pass
         self._hide_route_info()
 
+    # ------------------------------------------------------------------ #
+    #  Open AR                                                             #
+    # ------------------------------------------------------------------ #
+
     def _open_ar(self):
         try:
-            ar = self.manager.get_screen("ar")
+            ar        = self.manager.get_screen("ar")
             waypoints = getattr(self.route_layer, "_waypoints", None)
-            if waypoints and hasattr(ar, "set_route"):
+            if waypoints:
                 ar.set_route(waypoints)
+                print(f"[MapScreen] Opening AR with {len(waypoints)} waypoints")
+            else:
+                print("[MapScreen] No waypoints for AR")
             self.manager.current = "ar"
         except Exception as e:
             print(f"[MapScreen] _open_ar failed: {e}")
