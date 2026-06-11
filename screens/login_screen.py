@@ -1,8 +1,16 @@
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.label import MDLabel
-from kivymd.uix.textfield import MDTextField
-from kivymd.uix.button import MDButton, MDButtonText
+from kivymd.uix.textfield import (
+    MDTextField,
+    MDTextFieldHintText,
+    MDTextFieldLeadingIcon,
+)
+from kivymd.uix.button import (
+    MDButton,
+    MDButtonText,
+    MDIconButton,
+)
 from kivymd.uix.divider import MDDivider
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.floatlayout import FloatLayout
@@ -55,8 +63,8 @@ class LoginScreen(MDScreen):
             orientation="vertical",
             size_hint_y=None,
             adaptive_height=True,
-            padding=("24dp", "32dp", "24dp", "24dp"),
-            spacing="16dp",
+            padding=("24dp", "32dp", "24dp", "32dp"),
+            spacing="18dp",
         )
 
         form_wrap.add_widget(
@@ -71,22 +79,41 @@ class LoginScreen(MDScreen):
         )
 
         self.email_field = MDTextField(
-            hint_text="Email address",
+            MDTextFieldLeadingIcon(icon="email-outline"),
+            MDTextFieldHintText(text="Email address"),
             mode="outlined",
             size_hint_y=None,
-            height="56dp",
+            height="64dp",
             input_type="mail",
         )
         form_wrap.add_widget(self.email_field)
 
+        password_container = FloatLayout(
+            size_hint_y=None,
+            height="64dp",
+        )
+
         self.password_field = MDTextField(
-            hint_text="Password",
+            MDTextFieldLeadingIcon(icon="lock-outline"),
+            MDTextFieldHintText(text="Password"),
             mode="outlined",
             password=True,
-            size_hint_y=None,
-            height="56dp",
+            multiline=False,
+            size_hint=(1, None),
+            height="64dp",
+            pos_hint={"x": 0, "center_y": 0.5},
         )
-        form_wrap.add_widget(self.password_field)
+
+        self.password_eye = MDIconButton(
+            icon="eye-off",
+            pos_hint={"right": 0.995, "center_y": 0.5},
+            on_release=self.toggle_password,
+        )
+
+        password_container.add_widget(self.password_field)
+        password_container.add_widget(self.password_eye)
+
+        form_wrap.add_widget(password_container)
 
         self.error_label = MDLabel(
             text="",
@@ -165,6 +192,14 @@ class LoginScreen(MDScreen):
     def go_to_register(self, *args):
         self.clear_error()
         self.manager.current = "register"
+
+    def toggle_password(self, *args):
+        self.password_field.password = not self.password_field.password
+
+        self.password_eye.icon = (
+            "eye" if not self.password_field.password
+            else "eye-off"
+        )
 
     # ------------------------------------------------------------------ #
     #  Validation                                                          #

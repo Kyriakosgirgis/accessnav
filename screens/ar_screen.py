@@ -293,7 +293,7 @@ class ARScreen(MDScreen):
         # ── 6. Direction chip — top centre ────────────────────── #
         self.layout.add_widget(
             Label(
-                text="↑   Continue forward",
+                text="Continue forward",
                 font_size="17sp",
                 bold=True,
                 color=(1, 1, 1, 1),
@@ -323,28 +323,6 @@ class ARScreen(MDScreen):
         hud_w, hud_h = 240, 70
         hud_x = cx - hud_w / 2
         hud_y = 28
-
-        hud_bg = Widget()
-        with hud_bg.canvas:
-            Color(0, 0, 0, 0.58)
-            RoundedRectangle(
-                pos=(hud_x, hud_y),
-                size=(hud_w, hud_h),
-                radius=[18],
-            )
-            # Thin border
-            Color(1, 1, 1, 0.08)
-            Line(
-                rounded_rectangle=(hud_x, hud_y, hud_w, hud_h, 18),
-                width=1,
-            )
-            # Divider
-            Color(1, 1, 1, 0.12)
-            Line(
-                points=[cx, hud_y + 10, cx, hud_y + hud_h - 10],
-                width=1,
-            )
-        self.layout.add_widget(hud_bg)
 
         # Distance value
         self.layout.add_widget(

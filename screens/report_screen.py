@@ -334,7 +334,7 @@ class ReportScreen(MDScreen):
 
         MDSnackbar(
             MDSnackbarText(
-                text="Report submitted — thank you! ✓"
+                text="Report submitted — thank you!"
             ),
             duration=3,
         ).open()
