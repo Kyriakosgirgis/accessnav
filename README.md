@@ -157,12 +157,6 @@ python main.py
 pytest -v
 </pre>
 
-<hr>
-
-<h2>Project status</h2>
-
-<hr>
-
 <h2>Team</h2>
 
 <ul>
