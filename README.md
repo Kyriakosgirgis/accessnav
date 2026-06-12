@@ -161,53 +161,6 @@ pytest -v
 
 <h2>Project status</h2>
 
-<table>
-  <thead>
-    <tr>
-      <th>Area</th>
-      <th>Status</th>
-      <th>Notes</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>Auth &amp; sessions</td>
-      <td>Complete</td>
-      <td>bcrypt login/register, persistent sessions, route guards</td>
-    </tr>
-    <tr>
-      <td>Map &amp; GPS</td>
-      <td>Complete</td>
-      <td>Live location, search, accessibility POI layer</td>
-    </tr>
-    <tr>
-      <td>Routing</td>
-      <td>Complete</td>
-      <td>ORS wheelchair profile, scored polylines, route info card</td>
-    </tr>
-    <tr>
-      <td>AR navigation</td>
-      <td>Complete</td>
-      <td>Desktop simulation complete; Android WebView scene wired</td>
-    </tr>
-    <tr>
-      <td>Backend &amp; reports</td>
-      <td>Complete</td>
-      <td>FastAPI endpoints live, community layer on map</td>
-    </tr>
-    <tr>
-      <td>Settings &amp; polish</td>
-      <td>In progress</td>
-      <td>Accessibility settings done; error handling and docs remaining</td>
-    </tr>
-    <tr>
-      <td>Testing &amp; APK</td>
-      <td>In progress</td>
-      <td>API tests passing; routing/GPS tests and Android build remaining</td>
-    </tr>
-  </tbody>
-</table>
-
 <hr>
 
 <h2>Team</h2>
